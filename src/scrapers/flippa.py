@@ -75,6 +75,12 @@ class FlippaClient:
             params = self._build_api_params(page)
             data = self._api_request(FLIPPA_API_URL, params)
 
+            # If sort param causes issues, retry without it
+            if data is None and page == 1:
+                log.info("Retrying without sort param...")
+                params.pop("sort", None)
+                data = self._api_request(FLIPPA_API_URL, params)
+
             if data is None:
                 break
 
@@ -133,15 +139,20 @@ class FlippaClient:
         return all_listings
 
     def _build_api_params(self, page: int) -> dict:
-        """Build query parameters — intentionally broad, filter client-side."""
+        """Build query parameters — sort by profit descending so best deals come first."""
         params = {
             "page[number]": page,
             "page[size]": 50,
+            # Sort by profit descending — puts the most interesting listings first
+            # (without this, 10k results come in arbitrary order and we miss good deals)
+            "sort": "-profit_per_month",
         }
-        # Only set max price on the API side — it's the one filter that works
+        # Price filter
         max_price = FILTERS.get("max_price")
         if max_price:
             params["filter[price][max]"] = max_price
+        # Minimum price to filter out $0-$100 starter sites
+        params["filter[price][min]"] = FILTERS.get("min_price", 50_000)
         return params
 
     def _api_request(self, url: str, params: dict) -> Optional[dict]:

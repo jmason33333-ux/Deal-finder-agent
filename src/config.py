@@ -27,6 +27,7 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 # Search filters — broad funnel, progressively narrowed client-side
 FILTERS = {
+    "min_price": 50_000,
     "max_price": 500_000,
     "min_monthly_profit": 5_000,
 }
