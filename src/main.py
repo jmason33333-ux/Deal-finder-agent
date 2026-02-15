@@ -14,7 +14,7 @@ from src.scrapers.flippa import FlippaClient
 from src.analysis.scoring import score_listing
 from src.analysis.ai_analyzer import analyze_batch
 from src.sheets.writer import SheetsWriter
-from src.config import SCORE_THRESHOLD_SHEET, SCORE_THRESHOLD_AI_ANALYSIS, ANTHROPIC_API_KEY, GOOGLE_SHEET_ID
+from src.config import SCORE_THRESHOLD_SHEET, SCORE_THRESHOLD_AI_ANALYSIS, ANTHROPIC_API_KEY, GOOGLE_APPS_SCRIPT_URL
 from src.logger import get_logger
 
 log = get_logger("main")
@@ -64,13 +64,13 @@ def run_pipeline() -> list:
     )
 
     # Step 5: Write STRONG BUY listings to Google Sheets
-    if GOOGLE_SHEET_ID and qualified:
+    if GOOGLE_APPS_SCRIPT_URL and qualified:
         log.info("Step 5: Writing %d listings to Google Sheet...", len(qualified))
         writer = SheetsWriter()
         written = writer.write_listings(qualified)
         log.info("Wrote %d rows to sheet", written)
-    elif not GOOGLE_SHEET_ID:
-        log.warning("Step 5: Skipping Google Sheets — GOOGLE_SHEET_ID not set")
+    elif not GOOGLE_APPS_SCRIPT_URL:
+        log.warning("Step 5: Skipping Google Sheets — GOOGLE_APPS_SCRIPT_URL not set")
     else:
         log.info("Step 5: No STRONG BUY listings to write")
 
