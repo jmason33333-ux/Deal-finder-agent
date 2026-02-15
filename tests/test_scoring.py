@@ -39,6 +39,39 @@ def _make_listing(**kwargs) -> Listing:
     return Listing(**defaults)
 
 
+def _make_api_only_listing(**kwargs) -> Listing:
+    """Create a listing with only API-available data (no detail enrichment)."""
+    defaults = dict(
+        url="https://flippa.com/12345-test-store",
+        source="flippa",
+        business_name="Test Store",
+        niche="home",
+        asking_price=200_000,
+        monthly_revenue=20_000,
+        monthly_net_profit=7_000,
+        annual_revenue=240_000,
+        annual_net_profit=84_000,
+        platform="website",
+        business_age_months=24,
+        seller_location="United States",
+        # All these fields are unknown from the API:
+        traffic_sources={},
+        organic_traffic_pct=0,
+        email_list_size=0,
+        email_open_rate=0,
+        owner_hours_per_week=0,
+        fulfillment_type="",
+        has_documented_sops=False,
+        has_team=False,
+        support_tickets_per_month=0,
+        email_sophistication="",
+        sku_count=0,
+        repeat_customer_rate=0,
+    )
+    defaults.update(kwargs)
+    return Listing(**defaults)
+
+
 # ── Disqualifiers ───────────────────────────────────────────────────────
 
 
@@ -139,6 +172,18 @@ class TestFinancialScoring:
         # financial = 15 (multiple) + 8 (margin) + 4 (flat trend) = 27
         assert listing.score_breakdown["financial"] == 27
 
+    def test_unknown_trend_gets_neutral_score(self):
+        """Unknown revenue trend (None) should get neutral 4 pts."""
+        listing = _make_listing(
+            revenue_trend_yoy=None,
+            asking_price=240_000,
+            monthly_revenue=25_000,
+            monthly_net_profit=8_000,
+        )
+        score_listing(listing)
+        # financial = 15 (multiple) + 8 (margin) + 4 (neutral trend) = 27
+        assert listing.score_breakdown["financial"] == 27
+
 
 # ── Traffic & Customer Acquisition (25 pts) ─────────────────────────────
 
@@ -168,8 +213,6 @@ class TestTrafficScoring:
         """No email list → 0 email points regardless of open rate."""
         listing = _make_listing(email_list_size=0, email_open_rate=30)
         score_listing(listing)
-        # Can't assert exact email pts, but total traffic should be lower
-        # than a listing with a good list
         no_list = listing.score_breakdown["traffic"]
 
         listing2 = _make_listing(email_list_size=15_000, email_open_rate=25)
@@ -187,6 +230,13 @@ class TestTrafficScoring:
         score_listing(listing2)
         good_engage = listing2.score_breakdown["traffic"]
         assert good_engage > no_engage
+
+    def test_unknown_traffic_gets_neutral_score(self):
+        """Empty traffic data should get neutral scores, not 0."""
+        listing = _make_api_only_listing()
+        score_listing(listing)
+        # Should get: 5 (unknown diversification) + 4 (unknown organic) + 3 (unknown email) = 12
+        assert listing.score_breakdown["traffic"] == 12
 
 
 # ── Operational Simplicity (20 pts) ─────────────────────────────────────
@@ -230,6 +280,13 @@ class TestOperationsScoring:
         score_listing(listing)
         # hybrid = 3pts + 8 hours + 6 SOPs/team = 17
         assert listing.score_breakdown["operations"] == 17
+
+    def test_unknown_operations_gets_neutral_score(self):
+        """All unknown operational data should get neutral scores."""
+        listing = _make_api_only_listing()
+        score_listing(listing)
+        # 4 (unknown hours) + 3 (unknown fulfillment) + 2 (unknown team, all unknown) = 9
+        assert listing.score_breakdown["operations"] == 9
 
 
 # ── AI Optimization Upside (15 pts) ─────────────────────────────────────
@@ -296,11 +353,19 @@ class TestAIUpsideScoring:
         assert l2.score_breakdown["ai_upside"] > l3.score_breakdown["ai_upside"]
         assert l3.score_breakdown["ai_upside"] > l4.score_breakdown["ai_upside"]
 
-    def test_zero_tickets_gets_zero(self):
+    def test_zero_tickets_gets_moderate_score(self):
+        """0 tickets (unknown) should get moderate score, not 0."""
         listing = _make_listing(support_tickets_per_month=0)
         score_listing(listing)
-        # 0 tickets = 0pts (not 1), basic email = 5, 50 SKUs = 5 -> 10
-        assert listing.score_breakdown["ai_upside"] == 10
+        # 3 (unknown tickets) + 5 (basic email) + 5 (50 SKUs) = 13
+        assert listing.score_breakdown["ai_upside"] == 13
+
+    def test_unknown_ai_upside_gets_neutral_score(self):
+        """All unknown AI upside data should get neutral scores."""
+        listing = _make_api_only_listing()
+        score_listing(listing)
+        # 3 (unknown tickets) + 5 (empty = basic email) + 3 (unknown SKUs) = 11
+        assert listing.score_breakdown["ai_upside"] == 11
 
 
 # ── Strategic Fit (10 pts) ──────────────────────────────────────────────
@@ -367,6 +432,13 @@ class TestStrategicFitScoring:
         # 4 (home) + 3 (shopify) + 0 = 7
         assert listing.score_breakdown["strategic"] == 7
 
+    def test_unknown_niche_gets_1_pt_if_known(self):
+        """Known niche not in any list gets 1pt."""
+        listing = _make_listing(niche="automotive accessories")
+        score_listing(listing)
+        # 1 (unlisted niche) + 3 (shopify) + 3 (repeat > 20%) = 7
+        assert listing.score_breakdown["strategic"] == 7
+
 
 # ── Full Scoring ────────────────────────────────────────────────────────
 
@@ -416,6 +488,17 @@ class TestFullScoring:
         )
         score_listing(listing)
         assert listing.total_score >= 80
+
+    def test_api_only_listing_scores_reasonable(self):
+        """Listing with only API data should score 40-60 range (not 10)."""
+        listing = _make_api_only_listing()
+        score_listing(listing)
+        # Should get decent scores from financials + neutral scores elsewhere
+        assert listing.total_score >= 35, (
+            "API-only listings should score reasonably, got %d: %s"
+            % (listing.total_score, listing.score_breakdown)
+        )
+        assert listing.total_score <= 70  # shouldn't be too high either
 
 
 # ── Flippa Utility Tests ───────────────────────────────────────────────

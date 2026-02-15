@@ -9,6 +9,10 @@ Scoring engine for e-commerce business listings.
   - Strategic Fit (10 pts)
 
 Includes automatic disqualifiers that zero out the score.
+
+Missing data strategy: when fields are unknown (0 / empty), award
+neutral/mid-range scores rather than 0 so that financially promising
+listings aren't killed by missing operational data before enrichment.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ def score_listing(listing: Listing) -> Listing:
     # Check disqualifiers first
     disqualifier = _check_disqualifiers(listing)
     if disqualifier:
-        log.info("DISQUALIFIED [%s]: %s", listing.business_name, disqualifier)
+        log.info("DISQUALIFIED [%s]: %s", listing.business_name[:50], disqualifier)
         listing.total_score = 0
         listing.score_breakdown = {"disqualified": disqualifier}
         return listing
@@ -41,7 +45,7 @@ def score_listing(listing: Listing) -> Listing:
 
     log.info(
         "Scored [%s]: %d/100 — %s",
-        listing.business_name,
+        listing.business_name[:50],
         listing.total_score,
         breakdown,
     )
@@ -55,13 +59,13 @@ def _check_disqualifiers(listing: Listing) -> str:
     """Return a reason string if listing is automatically disqualified, else ''."""
     # Revenue declining > 25% YoY
     if listing.revenue_trend_yoy is not None and listing.revenue_trend_yoy < -0.25:
-        return f"Revenue declining {listing.revenue_trend_yoy:.0%} YoY"
+        return "Revenue declining {:.0%} YoY".format(listing.revenue_trend_yoy)
 
     # Single traffic source > 80%
     if listing.traffic_sources:
         max_share = max(listing.traffic_sources.values(), default=0)
         if max_share > 80:
-            return f"Single traffic source at {max_share:.0f}%"
+            return "Single traffic source at {:.0f}%".format(max_share)
 
     # Active litigation, IP disputes, or unresolved tax compliance issues
     if listing.has_legal_issues:
@@ -71,11 +75,11 @@ def _check_disqualifiers(listing: Listing) -> str:
     if listing.annual_net_profit > 0:
         multiple = listing.asking_price / listing.annual_net_profit
         if multiple > 5:
-            return f"Asking multiple too high: {multiple:.1f}x"
+            return "Asking multiple too high: {:.1f}x".format(multiple)
 
     # Owner involvement > 40 hrs/week with no team or SOPs
     if listing.owner_hours_per_week > 40 and not listing.has_team:
-        return f"Owner works {listing.owner_hours_per_week:.0f} hrs/wk with no team"
+        return "Owner works {:.0f} hrs/wk with no team".format(listing.owner_hours_per_week)
 
     # Regulated product categories
     if listing.is_regulated:
@@ -100,6 +104,7 @@ def _score_financial(listing: Listing) -> int:
         else:
             # Linear interpolation: 15 at 2.5x, 0 at 4.0x
             score += int(round(15 * (4.0 - pm) / 1.5))
+    # If profit_multiple is inf (no profit data), 0 points — financials must be real
 
     # Net Profit Margin: > 25% = 8pts, < 10% = 0pts
     margin = listing.net_margin_pct
@@ -113,6 +118,7 @@ def _score_financial(listing: Listing) -> int:
 
     # Revenue Trend: Growing > 10% = 7pts, Declining > 10% = 0pts
     # Linear scale: flat (0%) = 3.5pts
+    # Unknown trend (None) = 4pts (neutral — don't penalize missing data)
     trend = listing.revenue_trend_yoy
     if trend is not None:
         if trend >= 0.10:
@@ -122,6 +128,8 @@ def _score_financial(listing: Listing) -> int:
         else:
             # Linear: 0 at -10%, 7 at +10%
             score += int(round(7 * (trend + 0.10) / 0.20))
+    else:
+        score += 4  # neutral — unknown trend
 
     return min(score, 30)
 
@@ -146,21 +154,36 @@ def _score_traffic(listing: Listing) -> int:
             channel_score = min(num_channels, 3) / 3 * 5
             concentration_score = max(0, (70 - max_share) / 30) * 5
             score += int(round(channel_score + concentration_score))
+    else:
+        # Unknown traffic data — neutral score
+        score += 5
 
     # Organic Traffic %: > 40% = 8pts, < 10% = 0pts
+    # Unknown (0) with no traffic_sources → neutral
     organic = listing.organic_traffic_pct
-    if organic >= 40:
-        score += 8
-    elif organic <= 10:
-        score += 0
-    else:
-        # Linear between 10% and 40%
-        score += int(round(8 * (organic - 10) / 30))
+    if organic > 0:
+        if organic >= 40:
+            score += 8
+        elif organic <= 10:
+            score += 0
+        else:
+            # Linear between 10% and 40%
+            score += int(round(8 * (organic - 10) / 30))
+    elif not sources:
+        # No traffic data at all — neutral
+        score += 4
 
     # Email List: > 10K subs with > 20% open rate = 7pts
-    # Red flag: No list OR < 15% open rate = 0pts
-    # Partial credit: size (0-4 pts) + engagement quality (0-3 pts)
-    if listing.email_list_size == 0 or listing.email_open_rate < 15:
+    # Red flag: explicitly 0 list with some data known = 0pts
+    # Unknown data (both 0) → neutral
+    if listing.email_list_size == 0 and listing.email_open_rate == 0:
+        if not sources:
+            # Likely all data is unknown — neutral
+            score += 3
+        else:
+            # We have traffic data but no email list — probably really no list
+            score += 0
+    elif listing.email_list_size == 0 or listing.email_open_rate < 15:
         score += 0
     elif listing.email_list_size >= 10_000 and listing.email_open_rate >= 20:
         score += 7
@@ -179,6 +202,7 @@ def _score_operations(listing: Listing) -> int:
     score = 0
 
     # Owner Hours/Week: < 10hrs = 8pts, > 30hrs = 0pts
+    # Unknown (0) → neutral (we don't know yet)
     hours = listing.owner_hours_per_week
     if hours > 0:
         if hours <= 10:
@@ -187,8 +211,11 @@ def _score_operations(listing: Listing) -> int:
             score += 0
         else:
             score += int(round(8 * (30 - hours) / 20))
+    else:
+        score += 4  # unknown — neutral
 
     # Fulfillment: 3PL/dropship = 6pts, Amazon FBA = 4pts, owner-packed = 0pts
+    # Unknown → neutral
     ft = listing.fulfillment_type.lower()
     if ft in ("3pl", "dropship"):
         score += 6
@@ -198,14 +225,21 @@ def _score_operations(listing: Listing) -> int:
         score += 3
     elif ft == "owner_packed":
         score += 0
+    else:
+        score += 3  # unknown — neutral
 
     # Team/SOPs: Documented SOPs + freelancers on contract = 6pts
-    # Small team, some documentation = 3pts
-    # Key person risk, no documentation = 0pts
+    # Unknown → small credit (most established businesses have some process)
     if listing.has_documented_sops and listing.has_team:
         score += 6
     elif listing.has_documented_sops or listing.has_team:
         score += 3
+    else:
+        # If we have other operational data, this is truly "no team" = 0
+        # If all operational data is missing, give neutral
+        if hours == 0 and ft == "":
+            score += 2  # likely all unknown
+        # else: confirmed no SOPs/team = 0
 
     return min(score, 20)
 
@@ -218,6 +252,7 @@ def _score_ai_upside(listing: Listing) -> int:
 
     # Support Volume: 3-tier scoring
     # > 200 tickets/month = 5pts, 50-200 = 3pts, < 50 = 1pt
+    # Unknown (0) → moderate score (established businesses likely have support)
     tickets = listing.support_tickets_per_month
     if tickets >= 200:
         score += 5
@@ -225,6 +260,8 @@ def _score_ai_upside(listing: Listing) -> int:
         score += 3
     elif tickets > 0:
         score += 1
+    else:
+        score += 3  # unknown — moderate upside assumed
 
     # Email Sophistication — INVERSE scoring (less sophistication = more upside)
     # Basic flows only = 5pts, Some flows not optimized = 3pts, Full optimized = 1pt
@@ -238,9 +275,8 @@ def _score_ai_upside(listing: Listing) -> int:
 
     # Catalog Complexity:
     # 10-100 SKUs with structured data = 5pts
-    # 100-500 SKUs = 3pts
-    # > 500 SKUs or very messy = 1pt
-    # < 10 SKUs = 0pts (not enough to benefit from AI merchandising)
+    # 100-500 SKUs = 3pts, > 500 SKUs = 1pt, < 10 SKUs = 0pts
+    # Unknown (0) → moderate score
     skus = listing.sku_count
     if 10 <= skus <= 100:
         score += 5
@@ -248,7 +284,9 @@ def _score_ai_upside(listing: Listing) -> int:
         score += 3
     elif skus > 500:
         score += 1
-    # < 10 SKUs: 0 points
+    elif skus == 0:
+        score += 3  # unknown — moderate
+    # 1-9 SKUs: 0 points
 
     return min(score, 15)
 
@@ -272,6 +310,8 @@ YELLOW_NICHES = {
 RED_NICHES = {
     "supplements", "fashion", "electronics", "apparel", "clothing",
     "cbd", "medical", "pharmaceutical", "firearms", "weapons",
+    "gambling", "casino", "tobacco", "vape", "adult",
+    "crypto", "cryptocurrency", "forex",
 }
 
 
@@ -286,6 +326,9 @@ def _score_strategic(listing: Listing) -> int:
         score += 0
     elif any(n in niche_lower for n in YELLOW_NICHES):
         score += 2
+    elif niche_lower:
+        score += 1  # known niche but not in our lists — small credit
+    # unknown niche = 0 pts (can't assess strategic fit without knowing the niche)
 
     # Platform: Shopify/Shopify Plus = 3pts, WooCommerce = 1pt, others = 0pts
     platform_lower = listing.platform.lower()
@@ -294,7 +337,7 @@ def _score_strategic(listing: Listing) -> int:
     elif "woocommerce" in platform_lower or "woo" in platform_lower:
         score += 1
 
-    # Repeat Customer Rate: > 20% = 3pts, 10-20% = 1.5pts, < 10% = 0pts
+    # Repeat Customer Rate: > 20% = 3pts, 10-20% = 2pts, < 10% = 0pts
     if listing.repeat_customer_rate >= 20:
         score += 3
     elif listing.repeat_customer_rate >= 10:

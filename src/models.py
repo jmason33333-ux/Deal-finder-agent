@@ -37,9 +37,10 @@ class Listing:
             return (self.monthly_net_profit / self.monthly_revenue) * 100
         return 0.0
 
-    # Platform / age
+    # Platform / age / location
     platform: str = ""
     business_age_months: int = 0
+    seller_location: str = ""
 
     # Traffic
     traffic_sources: dict[str, float] = field(default_factory=dict)

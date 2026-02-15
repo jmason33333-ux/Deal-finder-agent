@@ -25,12 +25,26 @@ GOOGLE_APPS_SCRIPT_URL = os.getenv("GOOGLE_APPS_SCRIPT_URL", "")
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
-# Search filters
+# Search filters — broad funnel, progressively narrowed client-side
 FILTERS = {
-    "platform": "shopify",
-    "min_price": 100_000,
     "max_price": 500_000,
-    "business_model": "ecommerce",
+    "min_monthly_profit": 5_000,
+}
+
+# Location filter — seller must be in one of these regions
+ALLOWED_LOCATIONS = {
+    "us", "usa", "united states", "canada", "ca", "north america",
+}
+
+# Industries/niches to exclude — risky, regulated, or poor fit
+EXCLUDED_INDUSTRIES = {
+    "gambling", "casino", "betting", "poker",
+    "smoking", "tobacco", "vape", "vaping", "cigarette",
+    "medical equipment", "medical device", "pharmaceutical", "pharma",
+    "firearms", "weapons", "ammunition", "guns",
+    "adult", "xxx",
+    "cannabis", "marijuana", "cbd",
+    "cryptocurrency", "crypto", "forex", "binary options",
 }
 
 # Scoring thresholds

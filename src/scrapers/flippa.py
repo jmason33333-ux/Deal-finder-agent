@@ -3,6 +3,12 @@ Flippa data collection module.
 
 Uses Flippa's search API endpoint to fetch e-commerce listings.
 Falls back to HTML scraping if the API is unavailable or rate-limited.
+
+Filter strategy: broad API query → client-side funnel
+  1. API: fetch all listings up to $500k (no property_type filter — it returns 0)
+  2. Client: price <= $500k, profit >= $5k/month
+  3. Client: seller_location in North America
+  4. Client: industry not in excluded set
 """
 
 from __future__ import annotations
@@ -10,10 +16,11 @@ from __future__ import annotations
 import re
 import time
 import requests
+from datetime import datetime
 from bs4 import BeautifulSoup
 from typing import Optional
 
-from src.config import FLIPPA_API_KEY, FILTERS
+from src.config import FLIPPA_API_KEY, FILTERS, ALLOWED_LOCATIONS, EXCLUDED_INDUSTRIES
 from src.models import Listing
 from src.logger import get_logger
 
@@ -50,7 +57,7 @@ class FlippaClient:
         """Fetch listings using the API, falling back to scraping."""
         listings = self._fetch_via_api(max_pages)
         if not listings:
-            log.info("API returned no results, falling back to web scraping")
+            log.info("API returned no qualifying results, falling back to web scraping")
             listings = self._fetch_via_scraping(max_pages)
         log.info("Fetched %d total listings from Flippa", len(listings))
         return listings
@@ -58,84 +65,72 @@ class FlippaClient:
     # ── API-based fetching ──────────────────────────────────────────────
 
     def _fetch_via_api(self, max_pages: int) -> list[Listing]:
-        """Fetch listings from the Flippa search API."""
+        """Fetch listings from the Flippa search API with broad query."""
         all_listings: list[Listing] = []
+        skipped = {"price": 0, "profit": 0, "location": 0, "industry": 0, "parse": 0}
 
         for page in range(1, max_pages + 1):
             params = self._build_api_params(page)
             data = self._api_request(FLIPPA_API_URL, params)
 
-            # If no data or empty results on first page, progressively broaden the search
-            if page == 1 and (data is None or not data.get("data", [])):
-                # Try without price filters
-                log.info("No results — retrying without price filters...")
-                params.pop("filter[price][min]", None)
-                params.pop("filter[price][max]", None)
-                data = self._api_request(FLIPPA_API_URL, params)
-
-            if page == 1 and (data is None or not data.get("data", [])):
-                # Try with just property_type
-                log.info("Still no results — retrying with minimal filters...")
-                params = {"filter[property_type]": "ecommerce", "page[number]": 1, "page[size]": 50}
-                data = self._api_request(FLIPPA_API_URL, params)
-
-            if page == 1 and (data is None or not data.get("data", [])):
-                # Try completely unfiltered to see if API works at all
-                log.info("Still no results — trying unfiltered query...")
-                params = {"page[number]": 1, "page[size]": 10}
-                data = self._api_request(FLIPPA_API_URL, params)
-
             if data is None:
                 break
 
-            # Log full response structure on first page
+            # Log response structure on first page
             if page == 1:
-                log.info("API response keys: %s", list(data.keys()))
-                for key in data:
-                    val = data[key]
-                    if isinstance(val, list):
-                        log.info("  '%s': list with %d items", key, len(val))
-                    elif isinstance(val, dict):
-                        log.info("  '%s': dict with keys %s", key, list(val.keys())[:10])
-                    else:
-                        log.info("  '%s': %s", key, str(val)[:200])
+                meta = data.get("meta", {})
+                total = meta.get("total_results", "?")
+                log.info("API returned %s total results across all pages", total)
 
             results = data.get("data", [])
             if not results:
                 log.info("No more results at page %d", page)
                 break
 
-            # On first page, log a sample response so we can see available fields
+            # On first page, log a sample to verify field mapping
             if page == 1 and results:
                 sample = results[0]
-                log.info("Sample API listing keys: %s", list(sample.keys()))
-                attrs = sample.get("attributes", sample)
-                log.info("Sample attributes keys: %s", list(attrs.keys()) if isinstance(attrs, dict) else "N/A")
-                log.info("Sample listing: %s", {k: attrs.get(k) for k in list(attrs.keys())[:20]} if isinstance(attrs, dict) else str(sample)[:500])
+                log.debug("Sample API listing keys: %s", list(sample.keys()))
 
             for item in results:
                 listing = self._parse_api_listing(item)
-                if listing and self._passes_basic_filters(listing):
-                    all_listings.append(listing)
+                if listing is None:
+                    skipped["parse"] += 1
+                    continue
 
-            # Respect rate limits
-            total_pages = data.get("meta", {}).get("total_pages", page)
-            if page >= total_pages:
+                # Client-side funnel
+                reason = self._filter_listing(listing)
+                if reason:
+                    skipped[reason] += 1
+                    continue
+
+                all_listings.append(listing)
+
+            # Check if there are more pages
+            total_results = data.get("meta", {}).get("total_results", 0)
+            fetched_so_far = page * 50
+            if fetched_so_far >= total_results:
                 break
-            time.sleep(1)
+            time.sleep(1)  # respect rate limits
 
+        log.info(
+            "Funnel: %d passed | skipped — price:%d profit:%d location:%d industry:%d parse:%d",
+            len(all_listings), skipped["price"], skipped["profit"],
+            skipped["location"], skipped["industry"], skipped["parse"],
+        )
         return all_listings
 
     def _build_api_params(self, page: int) -> dict:
-        """Build query parameters for the Flippa API."""
-        return {
-            "filter[property_type]": "ecommerce",
-            "filter[sitetype]": "established",
-            "filter[price][min]": FILTERS["min_price"],
-            "filter[price][max]": FILTERS["max_price"],
+        """Build query parameters — intentionally broad, filter client-side."""
+        params = {
             "page[number]": page,
             "page[size]": 50,
         }
+        # Only set max price on the API side — it's the one filter that works
+        max_price = FILTERS.get("max_price")
+        if max_price:
+            params["filter[price][max]"] = max_price
+        return params
 
     def _api_request(self, url: str, params: dict) -> Optional[dict]:
         """Make an API request with retry logic."""
@@ -159,58 +154,98 @@ class FlippaClient:
         return None
 
     def _parse_api_listing(self, item: dict) -> Optional[Listing]:
-        """Parse a single listing from the Flippa API response."""
+        """Parse a single listing from the Flippa API response.
+
+        Actual API fields (from live response):
+            id, title, summary, html_url, display_price, current_price,
+            profit_per_month, revenue_per_month, average_profit, average_revenue,
+            industry, property_type, business_model, seller_location,
+            established_at, has_verified_revenue, has_verified_traffic,
+            page_views_per_month, uniques_per_month, revenue_sources
+        """
         try:
+            # The API returns flat objects (no "attributes" wrapper)
             attrs = item.get("attributes", item)
 
-            # Extract financial data
-            asking_price = _to_float(attrs.get("price", attrs.get("current_price", 0)))
-            monthly_revenue = _to_float(attrs.get("average_monthly_revenue", 0))
-            monthly_profit = _to_float(attrs.get("average_monthly_profit", 0))
+            # Financial data — use monthly fields, fall back to averages
+            asking_price = _to_float(attrs.get("display_price") or attrs.get("current_price", 0))
+            monthly_revenue = _to_float(attrs.get("revenue_per_month") or attrs.get("average_revenue", 0))
+            monthly_profit = _to_float(attrs.get("profit_per_month") or attrs.get("average_profit", 0))
 
-            # Build listing URL
-            listing_id = item.get("id", "")
-            slug = attrs.get("slug", attrs.get("title", "")).lower().replace(" ", "-")
-            url = f"https://flippa.com/listing/{listing_id}" if listing_id else ""
+            # URL — use html_url directly (constructing our own gives 404s)
+            url = attrs.get("html_url", "")
+            if not url and item.get("id"):
+                url = "https://flippa.com/{}".format(item["id"])
 
-            # Extract traffic breakdown if available
-            traffic_sources = {}
-            traffic_data = attrs.get("traffic_sources", {})
-            if isinstance(traffic_data, dict):
-                traffic_sources = {
-                    k: float(v) for k, v in traffic_data.items() if _to_float(v) > 0
-                }
+            # Business age from established_at timestamp
+            age_months = 0
+            established_at = attrs.get("established_at")
+            if established_at:
+                try:
+                    # Handle ISO format: "2026-01-01T11:00:00+11:00"
+                    est_str = established_at.split("T")[0]
+                    est_date = datetime.strptime(est_str, "%Y-%m-%d")
+                    now = datetime.now()
+                    age_months = max(0, (now.year - est_date.year) * 12 + (now.month - est_date.month))
+                except (ValueError, IndexError):
+                    pass
+
+            # Seller location
+            seller_location = attrs.get("seller_location", "") or ""
+
+            # Industry / niche
+            industry = attrs.get("industry", "") or ""
+
+            # Property type / business model
+            property_type = attrs.get("property_type", "") or ""
+            business_model = attrs.get("business_model", "") or ""
 
             listing = Listing(
                 url=url,
                 source="flippa",
-                business_name=attrs.get("title", "Unknown"),
-                niche=attrs.get("category", attrs.get("industry", "")),
+                business_name=attrs.get("title", "Unknown") or "Unknown",
+                niche=industry,
                 asking_price=asking_price,
                 monthly_revenue=monthly_revenue,
                 monthly_net_profit=monthly_profit,
                 annual_revenue=monthly_revenue * 12,
                 annual_net_profit=monthly_profit * 12,
-                revenue_trend_yoy=_to_float(attrs.get("revenue_trend", None)),
-                platform=attrs.get("platform", attrs.get("site_type", "")),
-                business_age_months=_to_int(attrs.get("age_months", attrs.get("established_for", 0))),
-                traffic_sources=traffic_sources,
-                organic_traffic_pct=_to_float(attrs.get("organic_traffic_percentage", 0)),
-                email_list_size=_to_int(attrs.get("email_subscribers", 0)),
-                email_open_rate=_to_float(attrs.get("email_open_rate", 0)),
-                owner_hours_per_week=_to_float(attrs.get("owner_hours_per_week", 0)),
-                fulfillment_type=_normalize_fulfillment(attrs.get("fulfillment", "")),
-                has_documented_sops=bool(attrs.get("has_sops", False)),
-                has_team=bool(attrs.get("has_team", attrs.get("employees", 0))),
-                support_tickets_per_month=_to_int(attrs.get("support_tickets_monthly", 0)),
-                sku_count=_to_int(attrs.get("sku_count", attrs.get("products_count", 0))),
-                repeat_customer_rate=_to_float(attrs.get("repeat_customer_rate", 0)),
-                is_regulated=bool(attrs.get("is_regulated", False)),
+                platform=property_type,
+                business_age_months=age_months,
+                seller_location=seller_location,
             )
             return listing
         except Exception as e:
             log.warning("Failed to parse API listing: %s", e)
             return None
+
+    # ── Client-side filtering funnel ────────────────────────────────────
+
+    def _filter_listing(self, listing: Listing) -> str:
+        """Apply client-side filters. Returns skip reason or '' if it passes."""
+        # Price cap
+        if listing.asking_price > FILTERS.get("max_price", 500_000):
+            return "price"
+
+        # Minimum monthly profit
+        min_profit = FILTERS.get("min_monthly_profit", 5_000)
+        if listing.monthly_net_profit < min_profit:
+            return "profit"
+
+        # Location — if seller_location is set, it must match North America
+        # If location is unknown/empty, let it through (we'll check during enrichment)
+        if listing.seller_location:
+            loc_lower = listing.seller_location.lower()
+            if not any(region in loc_lower for region in ALLOWED_LOCATIONS):
+                return "location"
+
+        # Excluded industries
+        if listing.niche:
+            niche_lower = listing.niche.lower()
+            if any(excl in niche_lower for excl in EXCLUDED_INDUSTRIES):
+                return "industry"
+
+        return ""
 
     # ── Web scraping fallback ───────────────────────────────────────────
 
@@ -220,10 +255,7 @@ class FlippaClient:
 
         for page in range(1, max_pages + 1):
             params = {
-                "filter[property_type]": "ecommerce",
-                "filter[sitetype]": "established",
-                "filter[price][min]": FILTERS["min_price"],
-                "filter[price][max]": FILTERS["max_price"],
+                "filter[price][max]": FILTERS.get("max_price", 500_000),
                 "page": page,
             }
             html = self._scrape_request(FLIPPA_SEARCH_URL, params)
@@ -235,7 +267,8 @@ class FlippaClient:
                 break
 
             for listing in page_listings:
-                if self._passes_basic_filters(listing):
+                reason = self._filter_listing(listing)
+                if not reason:
                     all_listings.append(listing)
 
             time.sleep(2)  # be polite
@@ -283,7 +316,7 @@ class FlippaClient:
             url = ""
             if link:
                 href = link.get("href", "")
-                url = href if href.startswith("http") else f"https://flippa.com{href}"
+                url = href if href.startswith("http") else "https://flippa.com{}".format(href)
 
             # Extract title
             title_el = card.select_one(
@@ -311,8 +344,6 @@ class FlippaClient:
                 profit_el.get_text(strip=True) if profit_el else "0"
             )
 
-            # Determine if it's a yearly or monthly figure based on label context
-            # Flippa typically shows monthly figures in cards
             listing = Listing(
                 url=url,
                 source="flippa",
@@ -355,19 +386,8 @@ class FlippaClient:
         if fulfillment_text:
             listing.fulfillment_type = _normalize_fulfillment(fulfillment_text)
 
-        log.info("Enriched listing: %s", listing.business_name)
+        log.info("Enriched listing: %s", listing.business_name[:60])
         return listing
-
-    # ── Filtering ───────────────────────────────────────────────────────
-
-    def _passes_basic_filters(self, listing: Listing) -> bool:
-        """Check if listing passes basic price/model filters."""
-        if listing.asking_price < FILTERS["min_price"]:
-            return False
-        if listing.asking_price > FILTERS["max_price"]:
-            return False
-        # Platform filter — skip if platform unknown (will be checked after enrichment)
-        return True
 
 
 # ── Utility functions ───────────────────────────────────────────────────

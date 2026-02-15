@@ -2,10 +2,11 @@
 Deal Finder Agent — main orchestrator.
 
 Runs the full pipeline:
-  1. Fetch listings from Flippa (and eventually Empire Flippers)
-  2. Score each listing
-  3. Send qualifying listings for AI analysis
-  4. Write results to Google Sheets
+  1. Fetch listings from Flippa (broad funnel)
+  2. Enrich qualifying listings with detail page data
+  3. Score each listing (100-point scale)
+  4. Send qualifying listings for AI analysis
+  5. Write results to Google Sheets
 """
 
 from __future__ import annotations
@@ -24,18 +25,18 @@ def run_pipeline() -> list:
     """Execute the full deal-finding pipeline."""
     log.info("=== Deal Finder Agent — starting run ===")
 
-    # Step 1: Fetch listings
+    # Step 1: Fetch listings (broad funnel → client-side filtering)
     log.info("Step 1: Fetching listings from Flippa...")
     flippa = FlippaClient()
     listings = flippa.fetch_listings(max_pages=5)
     log.info("Fetched %d listings from Flippa", len(listings))
 
     if not listings:
-        log.warning("No listings fetched. Exiting.")
+        log.warning("No listings fetched after filtering. Exiting.")
         return []
 
     # Step 2: Enrich with detail pages
-    log.info("Step 2: Enriching listings with detail data...")
+    log.info("Step 2: Enriching %d listings with detail data...", len(listings))
     for listing in listings:
         flippa.fetch_listing_details(listing)
 
@@ -82,14 +83,18 @@ def run_pipeline() -> list:
                 "CONDITIONAL" if listing.total_score >= 50 else "PASS"
             )
         )
-        log.info(
-            "  %3d  %-12s  %-35s  %s  $%,.0f",
+        # Use f-string to avoid Python % formatting issues with $, commas
+        price_str = "${:,.0f}".format(listing.asking_price)
+        profit_str = "${:,.0f}/mo".format(listing.monthly_net_profit)
+        msg = "  {:3d}  {:<12s}  {:<40s}  {:>10s}  {:>12s}  {}".format(
             listing.total_score,
             label,
-            listing.business_name[:35],
-            listing.source,
-            listing.asking_price,
+            listing.business_name[:40],
+            price_str,
+            profit_str,
+            listing.niche or "—",
         )
+        log.info("%s", msg)
 
     log.info("=== Deal Finder Agent — run complete ===")
     return qualified
