@@ -300,15 +300,18 @@ PREFERRED_NICHES = {
     "sports", "recreation", "craft", "diy",
 }
 
-# Yellow flag niches: general consumer goods, beauty, food → 2pts
+# Yellow flag niches: general consumer goods, beauty, food, electronics → 2pts
+# Note: "electronics" is a broad Flippa category that includes legitimate ecom
+# (e.g. tech accessories, gadgets), not just risky electronics reselling
 YELLOW_NICHES = {
     "beauty", "food", "consumer", "general", "health",
     "wellness", "cosmetics", "skincare",
+    "electronics", "design", "style",
 }
 
-# Red flag niches: supplements, fashion, electronics, regulated → 0pts
+# Red flag niches: supplements, fashion (high return rates), regulated → 0pts
 RED_NICHES = {
-    "supplements", "fashion", "electronics", "apparel", "clothing",
+    "supplements", "fashion", "apparel", "clothing",
     "cbd", "medical", "pharmaceutical", "firearms", "weapons",
     "gambling", "casino", "tobacco", "vape", "adult",
     "crypto", "cryptocurrency", "forex",

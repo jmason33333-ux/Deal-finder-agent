@@ -20,7 +20,7 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 from typing import Optional
 
-from src.config import FLIPPA_API_KEY, FILTERS, ALLOWED_LOCATIONS, EXCLUDED_INDUSTRIES
+from src.config import FLIPPA_API_KEY, FILTERS, EXCLUDED_INDUSTRIES
 from src.models import Listing
 from src.logger import get_logger
 
@@ -53,7 +53,7 @@ class FlippaClient:
         if FLIPPA_API_KEY:
             self.session.headers["Authorization"] = f"Bearer {FLIPPA_API_KEY}"
 
-    def fetch_listings(self, max_pages: int = 5) -> list[Listing]:
+    def fetch_listings(self, max_pages: int = 20) -> list[Listing]:
         """Fetch listings using the API, falling back to scraping."""
         listings = self._fetch_via_api(max_pages)
         if not listings:
@@ -67,19 +67,13 @@ class FlippaClient:
     def _fetch_via_api(self, max_pages: int) -> list[Listing]:
         """Fetch listings from the Flippa search API with broad query."""
         all_listings: list[Listing] = []
-        skipped = {"price": 0, "profit": 0, "location": 0, "industry": 0, "parse": 0}
+        skipped = {"price": 0, "profit": 0, "industry": 0, "parse": 0}
         # Track notable skips for diagnostics
         notable_skips: list[str] = []
 
         for page in range(1, max_pages + 1):
             params = self._build_api_params(page)
             data = self._api_request(FLIPPA_API_URL, params)
-
-            # If sort param causes issues, retry without it
-            if data is None and page == 1:
-                log.info("Retrying without sort param...")
-                params.pop("sort", None)
-                data = self._api_request(FLIPPA_API_URL, params)
 
             if data is None:
                 break
@@ -125,9 +119,9 @@ class FlippaClient:
             time.sleep(1)  # respect rate limits
 
         log.info(
-            "Funnel: %d passed | skipped — price:%d profit:%d location:%d industry:%d parse:%d",
+            "Funnel: %d passed | skipped — price:%d profit:%d industry:%d parse:%d",
             len(all_listings), skipped["price"], skipped["profit"],
-            skipped["location"], skipped["industry"], skipped["parse"],
+            skipped["industry"], skipped["parse"],
         )
 
         # Show notable skips so user can see what's being missed
@@ -139,19 +133,26 @@ class FlippaClient:
         return all_listings
 
     def _build_api_params(self, page: int) -> dict:
-        """Build query parameters — sort by profit descending so best deals come first."""
+        """Build query parameters for Flippa API.
+
+        Based on diagnostic testing (scripts/diagnose_api.py):
+        - sort param is IGNORED by the API (all sort values return same order)
+        - filter[property_type]=ecommerce_store works and narrows to ecom only
+        - filter[status]=open works to get only active listings
+        - filter[price][min/max] works to narrow price range
+        """
         params = {
             "page[number]": page,
             "page[size]": 50,
-            # Sort by profit descending — puts the most interesting listings first
-            # (without this, 10k results come in arbitrary order and we miss good deals)
-            "sort": "-profit_per_month",
+            # Only ecommerce stores (confirmed working value from API diagnostics)
+            "filter[property_type]": "ecommerce_store",
+            # Only active listings
+            "filter[status]": "open",
         }
         # Price filter
         max_price = FILTERS.get("max_price")
         if max_price:
             params["filter[price][max]"] = max_price
-        # Minimum price to filter out $0-$100 starter sites
         params["filter[price][min]"] = FILTERS.get("min_price", 50_000)
         return params
 
@@ -270,12 +271,9 @@ class FlippaClient:
             if listing.monthly_revenue < min_revenue_proxy:
                 return "profit"
 
-        # Location — if seller_location is set, it must match North America
-        # If location is unknown/empty, let it through (we'll check during enrichment)
-        if listing.seller_location:
-            loc_lower = listing.seller_location.lower()
-            if not any(region in loc_lower for region in ALLOWED_LOCATIONS):
-                return "location"
+        # NOTE: seller_location is NOT filtered — seller location != customer base
+        # (e.g. Australia-based seller can run a US/UK-facing ecommerce business)
+        # Location is stored on the listing for reference but not used as a filter.
 
         # Excluded industries
         if listing.niche:

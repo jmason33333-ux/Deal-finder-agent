@@ -28,7 +28,7 @@ def run_pipeline() -> list:
     # Step 1: Fetch listings (broad funnel → client-side filtering)
     log.info("Step 1: Fetching listings from Flippa...")
     flippa = FlippaClient()
-    listings = flippa.fetch_listings(max_pages=5)
+    listings = flippa.fetch_listings(max_pages=20)
     log.info("Fetched %d listings from Flippa", len(listings))
 
     if not listings:
