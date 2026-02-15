@@ -1,20 +1,22 @@
 """
-Claude AI analysis for high-scoring e-commerce listings.
+Gemini AI analysis for high-scoring e-commerce listings.
 
-Sends listing details to Claude API (claude-sonnet-4-5-20250929) for qualitative
+Uses Gemini 2.5 Flash via REST API (no SDK needed) for qualitative
 analysis including strengths, weaknesses, AI optimization opportunities,
 growth moves, and a buy/pass verdict.
 """
 
 from __future__ import annotations
 
-import anthropic
+import requests
 
-from src.config import ANTHROPIC_API_KEY, CLAUDE_MODEL, SCORE_THRESHOLD_AI_ANALYSIS
+from src.config import GEMINI_API_KEY, GEMINI_MODEL, SCORE_THRESHOLD_AI_ANALYSIS
 from src.models import Listing
 from src.logger import get_logger
 
 log = get_logger("ai_analyzer")
+
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 SYSTEM_PROMPT = """\
 You are an expert e-commerce acquisition analyst. Analyze this business listing for a buyer with the following profile:
@@ -39,7 +41,7 @@ Analyze the listing and provide:
 
 
 def analyze_listing(listing: Listing) -> Listing:
-    """Run Claude AI analysis on a single listing. Populates ai_analysis fields."""
+    """Run Gemini AI analysis on a single listing. Populates ai_analysis fields."""
     if listing.total_score < SCORE_THRESHOLD_AI_ANALYSIS:
         log.info(
             "Skipping AI analysis for [%s] — score %d < %d threshold",
@@ -49,33 +51,59 @@ def analyze_listing(listing: Listing) -> Listing:
         )
         return listing
 
-    if not ANTHROPIC_API_KEY:
-        log.warning("ANTHROPIC_API_KEY not set — skipping AI analysis")
+    if not GEMINI_API_KEY:
+        log.warning("GEMINI_API_KEY not set — skipping AI analysis")
         return listing
 
     listing_summary = _build_listing_summary(listing)
-    log.info("Requesting AI analysis for [%s]...", listing.business_name)
+    log.info("Requesting Gemini analysis for [%s]...", listing.business_name)
 
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        message = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=2000,
-            system=SYSTEM_PROMPT,
-            messages=[
+        url = GEMINI_API_URL.format(model=GEMINI_MODEL)
+        payload = {
+            "system_instruction": {
+                "parts": [{"text": SYSTEM_PROMPT}]
+            },
+            "contents": [
                 {
-                    "role": "user",
-                    "content": f"Analyze this e-commerce business listing for acquisition:\n\n{listing_summary}",
+                    "parts": [
+                        {
+                            "text": f"Analyze this e-commerce business listing for acquisition:\n\n{listing_summary}"
+                        }
+                    ]
                 }
             ],
+            "generationConfig": {
+                "maxOutputTokens": 2000,
+                "temperature": 0.7,
+            },
+        }
+
+        resp = requests.post(
+            url,
+            json=payload,
+            params={"key": GEMINI_API_KEY},
+            timeout=60,
         )
-        response_text = message.content[0].text
+
+        if resp.status_code != 200:
+            log.error(
+                "Gemini API error for [%s]: %d %s",
+                listing.business_name,
+                resp.status_code,
+                resp.text[:300],
+            )
+            return listing
+
+        data = resp.json()
+        response_text = data["candidates"][0]["content"]["parts"][0]["text"]
         _parse_ai_response(listing, response_text)
         log.info("AI analysis complete for [%s]", listing.business_name)
-    except anthropic.APIError as e:
-        log.error("Claude API error for [%s]: %s", listing.business_name, e)
-    except Exception as e:
-        log.error("Unexpected error during AI analysis for [%s]: %s", listing.business_name, e)
+
+    except (KeyError, IndexError) as e:
+        log.error("Failed to parse Gemini response for [%s]: %s", listing.business_name, e)
+    except requests.RequestException as e:
+        log.error("Gemini request failed for [%s]: %s", listing.business_name, e)
 
     return listing
 

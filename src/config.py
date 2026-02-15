@@ -16,7 +16,7 @@ if _secrets_path.exists():
     load_dotenv(_secrets_path)
 
 # API keys
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 FLIPPA_API_KEY = os.getenv("FLIPPA_API_KEY", "")
 
 # Google Sheets (via Apps Script web app — no credentials file needed)
@@ -37,5 +37,5 @@ FILTERS = {
 SCORE_THRESHOLD_AI_ANALYSIS = 65
 SCORE_THRESHOLD_SHEET = 80  # STRONG BUY only
 
-# Claude model for analysis
-CLAUDE_MODEL = "claude-sonnet-4-5-20250929"
+# Gemini model for analysis
+GEMINI_MODEL = "gemini-2.5-flash-preview-05-20"

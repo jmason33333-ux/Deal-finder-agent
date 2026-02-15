@@ -14,7 +14,7 @@ from src.scrapers.flippa import FlippaClient
 from src.analysis.scoring import score_listing
 from src.analysis.ai_analyzer import analyze_batch
 from src.sheets.writer import SheetsWriter
-from src.config import SCORE_THRESHOLD_SHEET, SCORE_THRESHOLD_AI_ANALYSIS, ANTHROPIC_API_KEY, GOOGLE_APPS_SCRIPT_URL
+from src.config import SCORE_THRESHOLD_SHEET, SCORE_THRESHOLD_AI_ANALYSIS, GEMINI_API_KEY, GOOGLE_APPS_SCRIPT_URL
 from src.logger import get_logger
 
 log = get_logger("main")
@@ -48,11 +48,11 @@ def run_pipeline() -> list:
     listings.sort(key=lambda l: l.total_score, reverse=True)
 
     # Step 4: AI analysis for listings scoring >= 65
-    if ANTHROPIC_API_KEY:
-        log.info("Step 4: Running Claude AI analysis on qualifying listings...")
+    if GEMINI_API_KEY:
+        log.info("Step 4: Running Gemini AI analysis on qualifying listings...")
         analyze_batch(listings)
     else:
-        log.warning("Step 4: Skipping AI analysis — ANTHROPIC_API_KEY not set")
+        log.warning("Step 4: Skipping AI analysis — GEMINI_API_KEY not set")
 
     # Filter to STRONG BUY candidates (score >= 80)
     qualified = [l for l in listings if l.total_score >= SCORE_THRESHOLD_SHEET]
