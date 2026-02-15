@@ -64,6 +64,9 @@ class Listing:
     # Regulated products flag
     is_regulated: bool = False
 
+    # Legal issues (litigation, IP disputes, tax compliance)
+    has_legal_issues: bool = False
+
     # Scoring results (filled by scoring engine)
     total_score: int = 0
     score_breakdown: dict[str, int] = field(default_factory=dict)

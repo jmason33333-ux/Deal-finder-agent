@@ -63,13 +63,17 @@ def _check_disqualifiers(listing: Listing) -> str:
         if max_share > 80:
             return f"Single traffic source at {max_share:.0f}%"
 
+    # Active litigation, IP disputes, or unresolved tax compliance issues
+    if listing.has_legal_issues:
+        return "Active litigation, IP disputes, or tax compliance issues"
+
     # Asking multiple > 5x annual profit
     if listing.annual_net_profit > 0:
         multiple = listing.asking_price / listing.annual_net_profit
         if multiple > 5:
             return f"Asking multiple too high: {multiple:.1f}x"
 
-    # Owner involvement > 40 hrs/week with no team
+    # Owner involvement > 40 hrs/week with no team or SOPs
     if listing.owner_hours_per_week > 40 and not listing.has_team:
         return f"Owner works {listing.owner_hours_per_week:.0f} hrs/wk with no team"
 
@@ -108,6 +112,7 @@ def _score_financial(listing: Listing) -> int:
         score += int(round(8 * (margin - 10) / 15))
 
     # Revenue Trend: Growing > 10% = 7pts, Declining > 10% = 0pts
+    # Linear scale: flat (0%) = 3.5pts
     trend = listing.revenue_trend_yoy
     if trend is not None:
         if trend >= 0.10:
@@ -137,7 +142,7 @@ def _score_traffic(listing: Listing) -> int:
         elif max_share >= 70:
             score += 0
         else:
-            # Partial credit based on diversification
+            # Partial credit based on channel count and concentration
             channel_score = min(num_channels, 3) / 3 * 5
             concentration_score = max(0, (70 - max_share) / 30) * 5
             score += int(round(channel_score + concentration_score))
@@ -149,13 +154,17 @@ def _score_traffic(listing: Listing) -> int:
     elif organic <= 10:
         score += 0
     else:
+        # Linear between 10% and 40%
         score += int(round(8 * (organic - 10) / 30))
 
-    # Email List: > 10K subs with > 20% open rate = 7pts, no list = 0pts
-    if listing.email_list_size >= 10_000 and listing.email_open_rate >= 20:
+    # Email List: > 10K subs with > 20% open rate = 7pts
+    # Red flag: No list OR < 15% open rate = 0pts
+    # Partial credit: size (0-4 pts) + engagement quality (0-3 pts)
+    if listing.email_list_size == 0 or listing.email_open_rate < 15:
+        score += 0
+    elif listing.email_list_size >= 10_000 and listing.email_open_rate >= 20:
         score += 7
-    elif listing.email_list_size > 0:
-        # Partial credit
+    else:
         size_score = min(listing.email_list_size / 10_000, 1.0) * 4
         rate_score = min(listing.email_open_rate / 20, 1.0) * 3
         score += int(round(size_score + rate_score))
@@ -179,16 +188,20 @@ def _score_operations(listing: Listing) -> int:
         else:
             score += int(round(8 * (30 - hours) / 20))
 
-    # Fulfillment: 3PL/dropship = 6pts, owner-packed = 0pts
+    # Fulfillment: 3PL/dropship = 6pts, Amazon FBA = 4pts, owner-packed = 0pts
     ft = listing.fulfillment_type.lower()
     if ft in ("3pl", "dropship"):
         score += 6
+    elif ft in ("fba", "amazon_fba"):
+        score += 4
     elif ft == "hybrid":
         score += 3
     elif ft == "owner_packed":
         score += 0
 
-    # Team/SOPs: Documented processes = 6pts, key person risk = 0pts
+    # Team/SOPs: Documented SOPs + freelancers on contract = 6pts
+    # Small team, some documentation = 3pts
+    # Key person risk, no documentation = 0pts
     if listing.has_documented_sops and listing.has_team:
         score += 6
     elif listing.has_documented_sops or listing.has_team:
@@ -203,60 +216,89 @@ def _score_operations(listing: Listing) -> int:
 def _score_ai_upside(listing: Listing) -> int:
     score = 0
 
-    # Support Volume: > 200 tickets/month = 5pts
+    # Support Volume: 3-tier scoring
+    # > 200 tickets/month = 5pts, 50-200 = 3pts, < 50 = 1pt
     tickets = listing.support_tickets_per_month
     if tickets >= 200:
         score += 5
+    elif tickets >= 50:
+        score += 3
     elif tickets > 0:
-        score += int(round(5 * min(tickets / 200, 1.0)))
+        score += 1
 
-    # Email Sophistication: Basic flows only (high upside) = 5pts
+    # Email Sophistication — INVERSE scoring (less sophistication = more upside)
+    # Basic flows only = 5pts, Some flows not optimized = 3pts, Full optimized = 1pt
     sophistication = listing.email_sophistication.lower()
     if sophistication in ("basic", ""):
-        # Basic or unknown = high upside for AI optimization
         score += 5
     elif sophistication == "moderate":
         score += 3
     elif sophistication == "advanced":
-        score += 1  # less room for improvement
+        score += 1
 
-    # Catalog Complexity: 10-100 SKUs = 5pts
+    # Catalog Complexity:
+    # 10-100 SKUs with structured data = 5pts
+    # 100-500 SKUs = 3pts
+    # > 500 SKUs or very messy = 1pt
+    # < 10 SKUs = 0pts (not enough to benefit from AI merchandising)
     skus = listing.sku_count
     if 10 <= skus <= 100:
         score += 5
-    elif skus > 100:
-        score += 3  # more complex but still opportunity
-    elif 1 <= skus < 10:
-        score += 2  # too simple, less AI value
+    elif 100 < skus <= 500:
+        score += 3
+    elif skus > 500:
+        score += 1
+    # < 10 SKUs: 0 points
 
     return min(score, 15)
 
 
 # ── Strategic Fit (10 points) ───────────────────────────────────────────
 
+# Green flag niches: home, outdoors, hobby, lifestyle, pets → 4pts
 PREFERRED_NICHES = {
     "home", "outdoors", "outdoor", "hobby", "lifestyle",
-    "garden", "camping", "fitness", "pet", "kitchen",
+    "garden", "camping", "fitness", "pet", "pets", "kitchen",
     "sports", "recreation", "craft", "diy",
+}
+
+# Yellow flag niches: general consumer goods, beauty, food → 2pts
+YELLOW_NICHES = {
+    "beauty", "food", "consumer", "general", "health",
+    "wellness", "cosmetics", "skincare",
+}
+
+# Red flag niches: supplements, fashion, electronics, regulated → 0pts
+RED_NICHES = {
+    "supplements", "fashion", "electronics", "apparel", "clothing",
+    "cbd", "medical", "pharmaceutical", "firearms", "weapons",
 }
 
 
 def _score_strategic(listing: Listing) -> int:
     score = 0
 
-    # Niche: Home/outdoors/hobby/lifestyle = 4pts
+    # Niche scoring with 3 tiers
     niche_lower = listing.niche.lower()
     if any(n in niche_lower for n in PREFERRED_NICHES):
         score += 4
+    elif any(n in niche_lower for n in RED_NICHES):
+        score += 0
+    elif any(n in niche_lower for n in YELLOW_NICHES):
+        score += 2
 
-    # Platform: Shopify = 3pts
-    if "shopify" in listing.platform.lower():
+    # Platform: Shopify/Shopify Plus = 3pts, WooCommerce = 1pt, others = 0pts
+    platform_lower = listing.platform.lower()
+    if "shopify" in platform_lower:
         score += 3
+    elif "woocommerce" in platform_lower or "woo" in platform_lower:
+        score += 1
 
-    # Repeat Customer Rate: > 20% = 3pts
+    # Repeat Customer Rate: > 20% = 3pts, 10-20% = 1.5pts, < 10% = 0pts
     if listing.repeat_customer_rate >= 20:
         score += 3
-    elif listing.repeat_customer_rate > 0:
-        score += int(round(3 * min(listing.repeat_customer_rate / 20, 1.0)))
+    elif listing.repeat_customer_rate >= 10:
+        score += 2  # round 1.5 up for int scoring
+    # < 10% = 0 points
 
     return min(score, 10)

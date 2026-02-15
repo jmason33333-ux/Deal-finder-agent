@@ -12,7 +12,8 @@ from __future__ import annotations
 
 from src.scrapers.flippa import FlippaClient
 from src.analysis.scoring import score_listing
-from src.config import SCORE_THRESHOLD_SHEET
+from src.analysis.ai_analyzer import analyze_batch
+from src.config import SCORE_THRESHOLD_SHEET, ANTHROPIC_API_KEY
 from src.logger import get_logger
 
 log = get_logger("main")
@@ -54,8 +55,12 @@ def run_pipeline() -> list:
         SCORE_THRESHOLD_SHEET,
     )
 
-    # Step 4: AI analysis for high-scoring listings (placeholder)
-    # TODO: Add Claude API analysis for listings with score >= 65
+    # Step 4: AI analysis for high-scoring listings (score >= 65)
+    if ANTHROPIC_API_KEY:
+        log.info("Step 4: Running Claude AI analysis on qualifying listings...")
+        analyze_batch(listings)
+    else:
+        log.warning("Step 4: Skipping AI analysis — ANTHROPIC_API_KEY not set")
 
     # Step 5: Write to Google Sheets (placeholder)
     # TODO: Add Google Sheets integration

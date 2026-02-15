@@ -377,6 +377,8 @@ def _normalize_fulfillment(text: str) -> str:
         return "3pl"
     if "drop" in text:
         return "dropship"
+    if "fba" in text or "amazon" in text:
+        return "fba"
     if "owner" in text or "self" in text or "in-house" in text:
         return "owner_packed"
     if "hybrid" in text:
