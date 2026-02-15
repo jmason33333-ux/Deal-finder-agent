@@ -64,6 +64,14 @@ class FlippaClient:
         for page in range(1, max_pages + 1):
             params = self._build_api_params(page)
             data = self._api_request(FLIPPA_API_URL, params)
+
+            # If price filters are rejected, retry without them (filter client-side)
+            if data is None and page == 1:
+                log.info("Retrying API without price filters...")
+                params.pop("filter[price][min]", None)
+                params.pop("filter[price][max]", None)
+                data = self._api_request(FLIPPA_API_URL, params)
+
             if data is None:
                 break
 
@@ -90,8 +98,8 @@ class FlippaClient:
         return {
             "filter[property_type]": "ecommerce",
             "filter[sitetype]": "established",
-            "filter[price_min]": FILTERS["min_price"],
-            "filter[price_max]": FILTERS["max_price"],
+            "filter[price][min]": FILTERS["min_price"],
+            "filter[price][max]": FILTERS["max_price"],
             "page[number]": page,
             "page[size]": 50,
             "sort_alias": "most_relevant",
@@ -182,8 +190,8 @@ class FlippaClient:
             params = {
                 "filter[property_type]": "ecommerce",
                 "filter[sitetype]": "established",
-                "filter[price_min]": FILTERS["min_price"],
-                "filter[price_max]": FILTERS["max_price"],
+                "filter[price][min]": FILTERS["min_price"],
+                "filter[price][max]": FILTERS["max_price"],
                 "page": page,
             }
             html = self._scrape_request(FLIPPA_SEARCH_URL, params)
@@ -326,9 +334,7 @@ class FlippaClient:
             return False
         if listing.asking_price > FILTERS["max_price"]:
             return False
-        # Platform filter — be lenient since data may be incomplete
-        if listing.platform and "shopify" not in listing.platform.lower():
-            return False
+        # Platform filter — skip if platform unknown (will be checked after enrichment)
         return True
 
 
