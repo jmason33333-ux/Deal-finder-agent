@@ -30,6 +30,7 @@ FILTERS = {
     "min_price": 50_000,
     "max_price": 500_000,
     "min_monthly_profit": 5_000,
+    "min_business_age_months": 24,  # at least 2 years to prove the model
 }
 
 # Location filter — seller must be in one of these regions

@@ -4,11 +4,10 @@ Flippa data collection module.
 Uses Flippa's search API endpoint to fetch e-commerce listings.
 Falls back to HTML scraping if the API is unavailable or rate-limited.
 
-Filter strategy: broad API query → client-side funnel
-  1. API: fetch all listings up to $500k (no property_type filter — it returns 0)
-  2. Client: price <= $500k, profit >= $5k/month
-  3. Client: seller_location in North America
-  4. Client: industry not in excluded set
+Filter strategy (based on API diagnostics in scripts/diagnose_api.py):
+  API-side:  property_type=ecommerce_store, status=open, price $50k-$500k
+  Client:    profit >= $5k/mo, age >= 2 years, industry not excluded
+  Note:      sort param is ignored by the API; we fetch 20 pages to compensate
 """
 
 from __future__ import annotations
@@ -67,7 +66,7 @@ class FlippaClient:
     def _fetch_via_api(self, max_pages: int) -> list[Listing]:
         """Fetch listings from the Flippa search API with broad query."""
         all_listings: list[Listing] = []
-        skipped = {"price": 0, "profit": 0, "industry": 0, "parse": 0}
+        skipped = {"price": 0, "profit": 0, "age": 0, "industry": 0, "parse": 0}
         # Track notable skips for diagnostics
         notable_skips: list[str] = []
 
@@ -119,9 +118,9 @@ class FlippaClient:
             time.sleep(1)  # respect rate limits
 
         log.info(
-            "Funnel: %d passed | skipped — price:%d profit:%d industry:%d parse:%d",
+            "Funnel: %d passed | skipped — price:%d profit:%d age:%d industry:%d parse:%d",
             len(all_listings), skipped["price"], skipped["profit"],
-            skipped["industry"], skipped["parse"],
+            skipped["age"], skipped["industry"], skipped["parse"],
         )
 
         # Show notable skips so user can see what's being missed
@@ -271,9 +270,11 @@ class FlippaClient:
             if listing.monthly_revenue < min_revenue_proxy:
                 return "profit"
 
-        # NOTE: seller_location is NOT filtered — seller location != customer base
-        # (e.g. Australia-based seller can run a US/UK-facing ecommerce business)
-        # Location is stored on the listing for reference but not used as a filter.
+        # Minimum business age — must be established > 2 years (24 months)
+        # age_months == 0 means unknown (no established_at in API) — let through
+        min_age = FILTERS.get("min_business_age_months", 24)
+        if 0 < listing.business_age_months < min_age:
+            return "age"
 
         # Excluded industries
         if listing.niche:
