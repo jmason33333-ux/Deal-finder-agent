@@ -12,9 +12,12 @@ Usage:
     python3 scripts/diagnose_api.py
 """
 
+from __future__ import annotations
+
 import requests
 import json
 import time
+from typing import Optional
 
 API_URL = "https://api.flippa.com/v3/listings"
 HEADERS = {
@@ -31,7 +34,7 @@ TARGET_NAMES = {
 }
 
 
-def fetch_page(params: dict) -> dict | None:
+def fetch_page(params: dict) -> Optional[dict]:
     try:
         resp = requests.get(API_URL, params=params, headers=HEADERS, timeout=15)
         if resp.status_code == 200:
