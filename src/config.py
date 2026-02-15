@@ -38,7 +38,7 @@ FILTERS = {
 
 # Scoring thresholds
 SCORE_THRESHOLD_AI_ANALYSIS = 65
-SCORE_THRESHOLD_SHEET = 50
+SCORE_THRESHOLD_SHEET = 80  # STRONG BUY only
 
 # Claude model for analysis
 CLAUDE_MODEL = "claude-sonnet-4-5-20250929"
