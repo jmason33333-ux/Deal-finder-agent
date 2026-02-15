@@ -80,6 +80,14 @@ class FlippaClient:
                 log.info("No more results at page %d", page)
                 break
 
+            # On first page, log a sample response so we can see available fields
+            if page == 1 and results:
+                sample = results[0]
+                log.info("Sample API listing keys: %s", list(sample.keys()))
+                attrs = sample.get("attributes", sample)
+                log.info("Sample attributes keys: %s", list(attrs.keys()) if isinstance(attrs, dict) else "N/A")
+                log.info("Sample listing: %s", {k: attrs.get(k) for k in list(attrs.keys())[:20]} if isinstance(attrs, dict) else str(sample)[:500])
+
             for item in results:
                 listing = self._parse_api_listing(item)
                 if listing and self._passes_basic_filters(listing):
@@ -102,7 +110,6 @@ class FlippaClient:
             "filter[price][max]": FILTERS["max_price"],
             "page[number]": page,
             "page[size]": 50,
-            "sort_alias": "most_relevant",
         }
 
     def _api_request(self, url: str, params: dict) -> Optional[dict]:
