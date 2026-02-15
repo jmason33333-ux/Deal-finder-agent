@@ -65,15 +65,40 @@ class FlippaClient:
             params = self._build_api_params(page)
             data = self._api_request(FLIPPA_API_URL, params)
 
-            # If price filters are rejected, retry without them (filter client-side)
-            if data is None and page == 1:
-                log.info("Retrying API without price filters...")
+            # If no data or empty results on first page, progressively broaden the search
+            if page == 1 and (data is None or not data.get("data", [])):
+                # Try without price filters
+                log.info("No results — retrying without price filters...")
                 params.pop("filter[price][min]", None)
                 params.pop("filter[price][max]", None)
                 data = self._api_request(FLIPPA_API_URL, params)
 
+            if page == 1 and (data is None or not data.get("data", [])):
+                # Try with just property_type
+                log.info("Still no results — retrying with minimal filters...")
+                params = {"filter[property_type]": "ecommerce", "page[number]": 1, "page[size]": 50}
+                data = self._api_request(FLIPPA_API_URL, params)
+
+            if page == 1 and (data is None or not data.get("data", [])):
+                # Try completely unfiltered to see if API works at all
+                log.info("Still no results — trying unfiltered query...")
+                params = {"page[number]": 1, "page[size]": 10}
+                data = self._api_request(FLIPPA_API_URL, params)
+
             if data is None:
                 break
+
+            # Log full response structure on first page
+            if page == 1:
+                log.info("API response keys: %s", list(data.keys()))
+                for key in data:
+                    val = data[key]
+                    if isinstance(val, list):
+                        log.info("  '%s': list with %d items", key, len(val))
+                    elif isinstance(val, dict):
+                        log.info("  '%s': dict with keys %s", key, list(val.keys())[:10])
+                    else:
+                        log.info("  '%s': %s", key, str(val)[:200])
 
             results = data.get("data", [])
             if not results:
