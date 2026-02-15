@@ -68,6 +68,8 @@ class FlippaClient:
         """Fetch listings from the Flippa search API with broad query."""
         all_listings: list[Listing] = []
         skipped = {"price": 0, "profit": 0, "location": 0, "industry": 0, "parse": 0}
+        # Track notable skips for diagnostics
+        notable_skips: list[str] = []
 
         for page in range(1, max_pages + 1):
             params = self._build_api_params(page)
@@ -87,11 +89,6 @@ class FlippaClient:
                 log.info("No more results at page %d", page)
                 break
 
-            # On first page, log a sample to verify field mapping
-            if page == 1 and results:
-                sample = results[0]
-                log.debug("Sample API listing keys: %s", list(sample.keys()))
-
             for item in results:
                 listing = self._parse_api_listing(item)
                 if listing is None:
@@ -102,6 +99,14 @@ class FlippaClient:
                 reason = self._filter_listing(listing)
                 if reason:
                     skipped[reason] += 1
+                    # Log notable skips — listings with revenue but filtered out
+                    if reason == "profit" and listing.monthly_revenue >= 10_000:
+                        notable_skips.append(
+                            "  SKIP[profit] rev={:,.0f}/mo profit={:,.0f}/mo price={:,.0f} — {}".format(
+                                listing.monthly_revenue, listing.monthly_net_profit,
+                                listing.asking_price, listing.business_name[:60],
+                            )
+                        )
                     continue
 
                 all_listings.append(listing)
@@ -118,6 +123,13 @@ class FlippaClient:
             len(all_listings), skipped["price"], skipped["profit"],
             skipped["location"], skipped["industry"], skipped["parse"],
         )
+
+        # Show notable skips so user can see what's being missed
+        if notable_skips:
+            log.info("Notable skips (had revenue >= $10k/mo but failed profit filter):")
+            for skip in notable_skips[:15]:
+                log.info("%s", skip)
+
         return all_listings
 
     def _build_api_params(self, page: int) -> dict:
@@ -222,15 +234,30 @@ class FlippaClient:
     # ── Client-side filtering funnel ────────────────────────────────────
 
     def _filter_listing(self, listing: Listing) -> str:
-        """Apply client-side filters. Returns skip reason or '' if it passes."""
+        """Apply client-side filters. Returns skip reason or '' if it passes.
+
+        Profit filter strategy: Many Flippa API listings report profit_per_month=0
+        even for profitable businesses (the real data is on the detail page).
+        So we use a fallback: if profit is 0 but monthly revenue is high enough
+        that a 20% margin would clear our threshold, let it through for enrichment.
+        """
         # Price cap
         if listing.asking_price > FILTERS.get("max_price", 500_000):
             return "price"
 
-        # Minimum monthly profit
+        # Minimum monthly profit — with revenue fallback
         min_profit = FILTERS.get("min_monthly_profit", 5_000)
-        if listing.monthly_net_profit < min_profit:
-            return "profit"
+        has_profit_data = listing.monthly_net_profit > 0
+        if has_profit_data:
+            # Profit data exists — use it directly
+            if listing.monthly_net_profit < min_profit:
+                return "profit"
+        else:
+            # No profit data — use revenue as proxy (assume ~20% margin is possible)
+            # Revenue of $25k/mo * 20% = $5k/mo profit potential
+            min_revenue_proxy = min_profit / 0.20  # $25k for $5k profit target
+            if listing.monthly_revenue < min_revenue_proxy:
+                return "profit"
 
         # Location — if seller_location is set, it must match North America
         # If location is unknown/empty, let it through (we'll check during enrichment)
