@@ -34,19 +34,18 @@ HEADER_ROW = [
     "Net Margin %",
     "Platform",
     "Business Age",
-    "Traffic Sources",
-    "Owner Hours/Week",
-    "TOTAL SCORE",
-    "Score Breakdown",
-    "AI Analysis",
-    "Top 3 Growth Moves",
-    "Estimated 12-Month ROI",
+    "Seller Location",
+    "AI Summary",
+    "AI Verdict",
+    "AI Strengths",
+    "AI Risks",
+    "AI Growth Moves",
     "Date Found",
 ]
 
 
 class SheetsWriter:
-    """Writes scored listings to Google Sheets via an Apps Script web app."""
+    """Writes qualified listings to Google Sheets via an Apps Script web app."""
 
     def __init__(self, webhook_url: str = ""):
         self.webhook_url = webhook_url or GOOGLE_APPS_SCRIPT_URL
@@ -83,7 +82,6 @@ class SheetsWriter:
                     timeout=30,
                     headers={"Content-Type": "application/json"},
                 )
-                # Apps Script redirects on success — follow it
                 if resp.status_code == 200:
                     result = resp.json()
                     written = result.get("rows_written", len(rows))

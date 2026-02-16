@@ -1,16 +1,19 @@
 """
-Gemini AI analysis for high-scoring e-commerce listings.
+AI listing summarizer using Gemini.
 
-Uses Gemini 2.5 Flash via REST API (no SDK needed) for qualitative
-analysis including strengths, weaknesses, AI optimization opportunities,
-growth moves, and a buy/pass verdict.
+For every qualified listing, reads the title + description + financials
+and produces a concise summary with:
+  - What the business sells
+  - Key strengths and risks
+  - Growth potential / AI optimization angle
+  - A verdict (STRONG BUY / INVESTIGATE / PASS)
 """
 
 from __future__ import annotations
 
 import requests
 
-from src.config import GEMINI_API_KEY, GEMINI_MODEL, SCORE_THRESHOLD_AI_ANALYSIS
+from src.config import GEMINI_API_KEY, GEMINI_MODEL
 from src.models import Listing
 from src.logger import get_logger
 
@@ -25,38 +28,27 @@ You are an expert e-commerce acquisition analyst. Analyze this business listing 
 - Running this alongside a full-time job (< 15 hours/week available)
 - Wife has design/creative skills and works at an e-commerce development agency
 - Budget: $100K-$500K acquisition price
-- Goal: Generate $5-10K/month net profit, use as AI optimization lab, document playbook for productization
+- Goal: Generate $5-10K/month net profit, use as AI optimization lab
 
-Analyze the listing and provide:
+Read the listing title, description, and financials carefully. Provide a structured analysis:
 
-1. **STRENGTHS** (2-3 specific strengths with data points from the listing)
-2. **WEAKNESSES** (2-3 specific risks or concerns identified)
-3. **AI OPTIMIZATION OPPORTUNITY** (specific workflows that can be automated and estimated monthly savings in dollars)
-4. **TOP 3 GROWTH MOVES** (specific, actionable strategies with projected ROI):
-   - Move 1: [Immediate win, implementable in 30 days]
-   - Move 2: [Medium-term growth lever, 60-90 days]
-   - Move 3: [Strategic play, 90-180 days]
-5. **VERDICT**: STRONG BUY / INVESTIGATE / CONDITIONAL / PASS with 1-sentence rationale
-6. **ESTIMATED 12-MONTH ROI**: Based on asking price and projected improvements"""
+1. **SUMMARY** (2-3 sentences): What does this business sell? What's the business model?
+2. **STRENGTHS** (2-3 bullet points): Key positives from the listing with specific data points
+3. **RISKS** (2-3 bullet points): Concerns, red flags, or unknowns
+4. **GROWTH MOVES** (2-3 bullet points): Specific things the buyer could do to grow this, especially AI/automation opportunities
+5. **VERDICT**: STRONG BUY / INVESTIGATE / PASS — with a 1-sentence rationale
+
+Keep the total response under 400 words. Be direct and specific, not generic."""
 
 
 def analyze_listing(listing: Listing) -> Listing:
-    """Run Gemini AI analysis on a single listing. Populates ai_analysis fields."""
-    if listing.total_score < SCORE_THRESHOLD_AI_ANALYSIS:
-        log.info(
-            "Skipping AI analysis for [%s] — score %d < %d threshold",
-            listing.business_name,
-            listing.total_score,
-            SCORE_THRESHOLD_AI_ANALYSIS,
-        )
-        return listing
-
+    """Run Gemini AI analysis on a single qualified listing."""
     if not GEMINI_API_KEY:
         log.warning("GEMINI_API_KEY not set — skipping AI analysis")
         return listing
 
-    listing_summary = _build_listing_summary(listing)
-    log.info("Requesting Gemini analysis for [%s]...", listing.business_name)
+    prompt_text = _build_prompt(listing)
+    log.info("Requesting AI summary for [%s]...", listing.business_name[:50])
 
     try:
         url = GEMINI_API_URL.format(model=GEMINI_MODEL)
@@ -66,16 +58,12 @@ def analyze_listing(listing: Listing) -> Listing:
             },
             "contents": [
                 {
-                    "parts": [
-                        {
-                            "text": f"Analyze this e-commerce business listing for acquisition:\n\n{listing_summary}"
-                        }
-                    ]
+                    "parts": [{"text": prompt_text}]
                 }
             ],
             "generationConfig": {
-                "maxOutputTokens": 2000,
-                "temperature": 0.7,
+                "maxOutputTokens": 1500,
+                "temperature": 0.5,
             },
         }
 
@@ -97,8 +85,8 @@ def analyze_listing(listing: Listing) -> Listing:
 
         data = resp.json()
         response_text = data["candidates"][0]["content"]["parts"][0]["text"]
-        _parse_ai_response(listing, response_text)
-        log.info("AI analysis complete for [%s]", listing.business_name)
+        _parse_response(listing, response_text)
+        log.info("AI summary complete for [%s]", listing.business_name[:50])
 
     except (KeyError, IndexError) as e:
         log.error("Failed to parse Gemini response for [%s]: %s", listing.business_name, e)
@@ -109,33 +97,34 @@ def analyze_listing(listing: Listing) -> Listing:
 
 
 def analyze_batch(listings: list[Listing]) -> list[Listing]:
-    """Run AI analysis on all qualifying listings in a batch."""
-    qualifying = [l for l in listings if l.total_score >= SCORE_THRESHOLD_AI_ANALYSIS]
+    """Run AI analysis on all qualified listings."""
+    qualified = [l for l in listings if l.qualified]
     log.info(
-        "%d of %d listings qualify for AI analysis (score >= %d)",
-        len(qualifying),
+        "%d of %d listings qualified for AI analysis",
+        len(qualified),
         len(listings),
-        SCORE_THRESHOLD_AI_ANALYSIS,
     )
-    for listing in qualifying:
+    for listing in qualified:
         analyze_listing(listing)
     return listings
 
 
-def _build_listing_summary(listing: Listing) -> str:
-    """Build a structured text summary of the listing for the AI prompt."""
-    traffic_str = ", ".join(
-        f"{src}: {pct:.0f}%" for src, pct in listing.traffic_sources.items()
-    )
-    breakdown_str = ", ".join(
-        f"{k}: {v}pts" for k, v in listing.score_breakdown.items()
-    )
+def _build_prompt(listing: Listing) -> str:
+    """Build the prompt from listing data."""
+    desc_section = ""
+    if listing.description:
+        # Truncate description to keep prompt reasonable
+        desc = listing.description[:3000]
+        desc_section = f"\nLISTING DESCRIPTION:\n{desc}\n"
 
-    return f"""BUSINESS: {listing.business_name}
+    return f"""Analyze this e-commerce business listing for acquisition:
+
+LISTING TITLE: {listing.listing_title or listing.business_name}
 SOURCE: {listing.source}
 URL: {listing.url}
-NICHE: {listing.niche}
-
+NICHE: {listing.niche or "Not specified"}
+LOCATION: {listing.seller_location or "Not specified"}
+{desc_section}
 FINANCIALS:
 - Asking Price: ${listing.asking_price:,.0f}
 - Monthly Revenue: ${listing.monthly_revenue:,.0f}
@@ -143,32 +132,11 @@ FINANCIALS:
 - Annual Revenue: ${listing.annual_revenue:,.0f}
 - Annual Net Profit: ${listing.annual_net_profit:,.0f}
 - Profit Multiple: {listing.profit_multiple:.1f}x
-- Net Profit Margin: {listing.net_margin_pct:.1f}%
+- Net Margin: {listing.net_margin_pct:.1f}%
 - Revenue Trend (YoY): {_format_trend(listing.revenue_trend_yoy)}
 
-PLATFORM & OPERATIONS:
-- Platform: {listing.platform}
-- Business Age: {listing.business_age_months} months
-- Owner Hours/Week: {listing.owner_hours_per_week:.0f}
-- Fulfillment: {listing.fulfillment_type}
-- Documented SOPs: {"Yes" if listing.has_documented_sops else "No"}
-- Has Team/Contractors: {"Yes" if listing.has_team else "No"}
-
-TRAFFIC & MARKETING:
-- Traffic Sources: {traffic_str or "Not specified"}
-- Organic Traffic: {listing.organic_traffic_pct:.0f}%
-- Email List Size: {listing.email_list_size:,}
-- Email Open Rate: {listing.email_open_rate:.0f}%
-- Email Sophistication: {listing.email_sophistication or "Unknown"}
-
-PRODUCT & CUSTOMERS:
-- SKU Count: {listing.sku_count}
-- Repeat Customer Rate: {listing.repeat_customer_rate:.0f}%
-- Support Tickets/Month: {listing.support_tickets_per_month}
-
-SCORING:
-- Total Score: {listing.total_score}/100
-- Breakdown: {breakdown_str}"""
+BUSINESS AGE: {listing.business_age_months} months ({listing.business_age_months // 12} years)
+PLATFORM: {listing.platform or "Not specified"}"""
 
 
 def _format_trend(trend) -> str:
@@ -177,27 +145,34 @@ def _format_trend(trend) -> str:
     return f"{trend:+.0%}"
 
 
-def _parse_ai_response(listing: Listing, response: str) -> None:
+def _parse_response(listing: Listing, response: str) -> None:
     """Parse the AI response and populate listing fields."""
-    listing.ai_analysis = response
+    listing.ai_summary = response
 
-    # Extract growth moves section
-    growth_start = response.find("TOP 3 GROWTH MOVES")
-    if growth_start == -1:
-        growth_start = response.find("GROWTH MOVES")
-    verdict_start = response.find("VERDICT")
+    # Extract verdict
+    verdict_start = response.upper().find("VERDICT")
+    if verdict_start != -1:
+        verdict_line = response[verdict_start:verdict_start + 200]
+        if "STRONG BUY" in verdict_line.upper():
+            listing.ai_verdict = "STRONG BUY"
+        elif "INVESTIGATE" in verdict_line.upper():
+            listing.ai_verdict = "INVESTIGATE"
+        elif "PASS" in verdict_line.upper():
+            listing.ai_verdict = "PASS"
 
-    if growth_start != -1 and verdict_start != -1:
-        listing.top_growth_moves = response[growth_start:verdict_start].strip()
-    elif growth_start != -1:
-        listing.top_growth_moves = response[growth_start:growth_start + 500].strip()
+    # Extract strengths section
+    strengths_start = response.upper().find("STRENGTH")
+    risks_start = response.upper().find("RISK")
+    growth_start = response.upper().find("GROWTH")
 
-    # Extract estimated ROI
-    roi_start = response.find("12-MONTH ROI")
-    if roi_start == -1:
-        roi_start = response.find("ESTIMATED")
-    if roi_start != -1:
-        # Take the rest of the response from ROI marker
-        roi_text = response[roi_start:]
-        # Limit to a reasonable length
-        listing.estimated_12mo_roi = roi_text[:300].strip()
+    if strengths_start != -1:
+        end = risks_start if risks_start != -1 else growth_start if growth_start != -1 else strengths_start + 500
+        listing.ai_strengths = response[strengths_start:end].strip()[:500]
+
+    if risks_start != -1:
+        end = growth_start if growth_start != -1 else verdict_start if verdict_start != -1 else risks_start + 500
+        listing.ai_risks = response[risks_start:end].strip()[:500]
+
+    if growth_start != -1:
+        end = verdict_start if verdict_start != -1 else growth_start + 500
+        listing.ai_growth_moves = response[growth_start:end].strip()[:500]

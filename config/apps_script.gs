@@ -72,18 +72,21 @@ function handleAppend(sheet, data) {
     written++;
   }
 
-  // Highlight STRONG BUY scores (column N = 14) in green
+  // Highlight rows by AI Verdict (column N = 14)
   if (sheet.getLastRow() > 1) {
-    var scoreCol = 14; // TOTAL SCORE column
+    var verdictCol = 14; // AI Verdict column
     var dataStart = 2;
     var dataEnd = sheet.getLastRow();
-    var scoreRange = sheet.getRange(dataStart, scoreCol, dataEnd - dataStart + 1, 1);
-    var scores = scoreRange.getValues();
-    for (var r = 0; r < scores.length; r++) {
-      var score = parseInt(scores[r][0], 10);
-      if (score >= 80) {
+    var verdictRange = sheet.getRange(dataStart, verdictCol, dataEnd - dataStart + 1, 1);
+    var verdicts = verdictRange.getValues();
+    for (var r = 0; r < verdicts.length; r++) {
+      var verdict = (verdicts[r][0] || "").toString().toUpperCase();
+      if (verdict.indexOf("STRONG BUY") !== -1) {
         sheet.getRange(dataStart + r, 1, 1, sheet.getLastColumn())
              .setBackground("#d4edda"); // light green
+      } else if (verdict.indexOf("INVESTIGATE") !== -1) {
+        sheet.getRange(dataStart + r, 1, 1, sheet.getLastColumn())
+             .setBackground("#fff3cd"); // light yellow
       }
     }
   }
@@ -121,19 +124,21 @@ function testAppend() {
         headers: [
           "Listing URL", "Source", "Business Name", "Niche", "Asking Price",
           "Monthly Revenue", "Monthly Net Profit", "Profit Multiple", "Net Margin %",
-          "Platform", "Business Age", "Traffic Sources", "Owner Hours/Week",
-          "TOTAL SCORE", "Score Breakdown", "AI Analysis", "Top 3 Growth Moves",
-          "Estimated 12-Month ROI", "Date Found"
+          "Platform", "Business Age", "Seller Location",
+          "AI Summary", "AI Verdict", "AI Strengths", "AI Risks",
+          "AI Growth Moves", "Date Found"
         ],
         rows: [
           [
             "https://flippa.com/example", "flippa", "Test Store", "Health & Wellness",
             "$250,000", "$18,000", "$7,200", "2.9x", "40.0%", "shopify", "36 mo",
-            "organic: 45%, paid: 30%, email: 25%", "10", 85,
-            "financial: 22 | traffic: 12 | ops: 10 | ai_upside: 8 | strategic: 8",
-            "Strong fundamentals with diversified traffic...",
-            "1) AI customer support  2) Email automation  3) SEO expansion",
-            "35-50%", "2026-02-15"
+            "United States",
+            "This is an established health & wellness ecommerce store...",
+            "INVESTIGATE",
+            "Strong margins, diversified product line",
+            "Single traffic source dependency",
+            "AI-powered email flows, chatbot for support",
+            "2026-02-16"
           ]
         ]
       })

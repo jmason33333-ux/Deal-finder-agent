@@ -25,17 +25,19 @@ GOOGLE_APPS_SCRIPT_URL = os.getenv("GOOGLE_APPS_SCRIPT_URL", "")
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
-# Search filters — broad funnel, progressively narrowed client-side
+# Qualification filters — hard pass/fail gates
 FILTERS = {
     "min_price": 50_000,
     "max_price": 500_000,
     "min_monthly_profit": 5_000,
+    "max_profit_multiple": 4.0,
+    "min_net_margin_pct": 10.0,
     "min_business_age_months": 24,  # at least 2 years to prove the model
 }
 
-# Location filter — seller must be in one of these regions
+# Location filter — seller must be in the US
 ALLOWED_LOCATIONS = {
-    "us", "usa", "united states", "canada", "ca", "north america",
+    "us", "usa", "united states",
 }
 
 # Industries/niches to exclude — risky, regulated, or poor fit
@@ -49,9 +51,5 @@ EXCLUDED_INDUSTRIES = {
     "cryptocurrency", "crypto", "forex", "binary options",
 }
 
-# Scoring thresholds
-SCORE_THRESHOLD_AI_ANALYSIS = 65
-SCORE_THRESHOLD_SHEET = 80  # STRONG BUY only
-
-# Gemini model for analysis
+# Gemini model for AI summarization
 GEMINI_MODEL = "gemini-2.5-flash-preview-05-20"

@@ -1,12 +1,12 @@
-"""Tests for the scoring engine."""
+"""Tests for the qualification engine and data model."""
 
 import pytest
 from src.models import Listing
-from src.analysis.scoring import score_listing
+from src.analysis.scoring import qualify_listing
 
 
 def _make_listing(**kwargs) -> Listing:
-    """Create a listing with sensible defaults, overridden by kwargs."""
+    """Create a listing that passes all qualification filters by default."""
     defaults = dict(
         url="https://flippa.com/listing/12345",
         source="flippa",
@@ -17,30 +17,16 @@ def _make_listing(**kwargs) -> Listing:
         monthly_net_profit=8_000,
         annual_revenue=300_000,
         annual_net_profit=96_000,
-        revenue_trend_yoy=0.15,
         platform="shopify",
         business_age_months=36,
-        traffic_sources={"organic": 35, "paid": 30, "social": 20, "direct": 15},
-        organic_traffic_pct=35,
-        email_list_size=12_000,
-        email_open_rate=22,
-        owner_hours_per_week=8,
-        fulfillment_type="3pl",
-        has_documented_sops=True,
-        has_team=True,
-        support_tickets_per_month=250,
-        email_sophistication="basic",
-        sku_count=50,
-        repeat_customer_rate=25,
-        is_regulated=False,
-        has_legal_issues=False,
+        seller_location="United States",
     )
     defaults.update(kwargs)
     return Listing(**defaults)
 
 
-def _make_api_only_listing(**kwargs) -> Listing:
-    """Create a listing with only API-available data (no detail enrichment)."""
+def _make_minimal_listing(**kwargs) -> Listing:
+    """Create a listing with minimal data (just enough to qualify)."""
     defaults = dict(
         url="https://flippa.com/12345-test-store",
         source="flippa",
@@ -54,451 +40,239 @@ def _make_api_only_listing(**kwargs) -> Listing:
         platform="website",
         business_age_months=24,
         seller_location="United States",
-        # All these fields are unknown from the API:
-        traffic_sources={},
-        organic_traffic_pct=0,
-        email_list_size=0,
-        email_open_rate=0,
-        owner_hours_per_week=0,
-        fulfillment_type="",
-        has_documented_sops=False,
-        has_team=False,
-        support_tickets_per_month=0,
-        email_sophistication="",
-        sku_count=0,
-        repeat_customer_rate=0,
     )
     defaults.update(kwargs)
     return Listing(**defaults)
 
 
-# ── Disqualifiers ───────────────────────────────────────────────────────
+# ── Qualification Filters ──────────────────────────────────────────────
 
 
-class TestDisqualifiers:
-    def test_revenue_declining_over_25_pct(self):
-        listing = _make_listing(revenue_trend_yoy=-0.30)
-        score_listing(listing)
-        assert listing.total_score == 0
-        assert "disqualified" in listing.score_breakdown
+class TestFinancialFilters:
+    def test_profit_below_minimum_fails(self):
+        listing = _make_listing(monthly_net_profit=3_000, annual_net_profit=36_000)
+        qualify_listing(listing)
+        assert not listing.qualified
+        assert "Profit" in listing.disqualify_reason
 
-    def test_single_traffic_source_over_80_pct(self):
-        listing = _make_listing(traffic_sources={"paid": 85, "organic": 15})
-        score_listing(listing)
-        assert listing.total_score == 0
+    def test_profit_at_minimum_passes(self):
+        # asking_price=200k, annual=60k -> 3.3x multiple (under 4x)
+        listing = _make_listing(
+            asking_price=200_000, monthly_net_profit=5_000,
+            annual_net_profit=60_000, monthly_revenue=20_000,
+        )
+        qualify_listing(listing)
+        assert listing.qualified
 
-    def test_asking_multiple_over_5x(self):
-        listing = _make_listing(asking_price=500_000, annual_net_profit=80_000)
-        score_listing(listing)
-        assert listing.total_score == 0
+    def test_profit_above_minimum_passes(self):
+        listing = _make_listing(
+            asking_price=250_000, monthly_net_profit=10_000,
+            annual_net_profit=120_000, monthly_revenue=25_000,
+        )
+        qualify_listing(listing)
+        assert listing.qualified
 
-    def test_owner_over_40_hrs_no_team(self):
-        listing = _make_listing(owner_hours_per_week=45, has_team=False)
-        score_listing(listing)
-        assert listing.total_score == 0
+    def test_no_profit_data_uses_revenue_proxy(self):
+        """No profit data but high revenue should pass (assumes 20% margin possible)."""
+        listing = _make_listing(
+            asking_price=200_000,
+            monthly_net_profit=0, annual_net_profit=0,
+            monthly_revenue=30_000, annual_revenue=360_000,
+        )
+        qualify_listing(listing)
+        assert listing.qualified
 
-    def test_regulated_product(self):
-        listing = _make_listing(is_regulated=True)
-        score_listing(listing)
-        assert listing.total_score == 0
+    def test_no_profit_low_revenue_fails(self):
+        """No profit data and low revenue should fail."""
+        listing = _make_listing(
+            monthly_net_profit=0, annual_net_profit=0,
+            monthly_revenue=10_000, annual_revenue=120_000,
+        )
+        qualify_listing(listing)
+        assert not listing.qualified
 
-    def test_legal_issues_disqualifies(self):
-        listing = _make_listing(has_legal_issues=True)
-        score_listing(listing)
-        assert listing.total_score == 0
-        assert "litigation" in listing.score_breakdown["disqualified"].lower()
+    def test_multiple_above_4x_fails(self):
+        listing = _make_listing(asking_price=400_000, annual_net_profit=80_000)
+        qualify_listing(listing)
+        assert not listing.qualified
+        assert "multiple" in listing.disqualify_reason.lower()
 
-    def test_not_disqualified_when_clean(self):
+    def test_multiple_at_4x_passes(self):
+        listing = _make_listing(
+            asking_price=320_000, annual_net_profit=80_000,
+            monthly_net_profit=6_667, monthly_revenue=25_000,
+        )
+        qualify_listing(listing)
+        assert listing.qualified
+
+    def test_multiple_below_4x_passes(self):
+        listing = _make_listing(
+            asking_price=200_000, annual_net_profit=80_000,
+            monthly_net_profit=6_667, monthly_revenue=25_000,
+        )
+        qualify_listing(listing)
+        assert listing.qualified
+
+    def test_low_margin_fails(self):
+        """Net margin below 10% should fail."""
+        listing = _make_listing(
+            monthly_revenue=100_000, monthly_net_profit=8_000,
+            annual_revenue=1_200_000, annual_net_profit=96_000,
+        )
+        qualify_listing(listing)
+        assert not listing.qualified
+        assert "margin" in listing.disqualify_reason.lower()
+
+    def test_margin_at_10_pct_passes(self):
+        listing = _make_listing(
+            asking_price=200_000,
+            monthly_revenue=50_000, monthly_net_profit=5_000,
+            annual_revenue=600_000, annual_net_profit=60_000,
+        )
+        qualify_listing(listing)
+        assert listing.qualified
+
+    def test_price_too_low_fails(self):
+        listing = _make_listing(asking_price=30_000)
+        qualify_listing(listing)
+        assert not listing.qualified
+        assert "price" in listing.disqualify_reason.lower()
+
+    def test_price_too_high_fails(self):
+        listing = _make_listing(
+            asking_price=600_000,
+            annual_net_profit=200_000, monthly_net_profit=16_667,
+        )
+        qualify_listing(listing)
+        assert not listing.qualified
+        assert "price" in listing.disqualify_reason.lower()
+
+
+class TestAgeFilter:
+    def test_young_business_fails(self):
+        listing = _make_listing(business_age_months=12)
+        qualify_listing(listing)
+        assert not listing.qualified
+        assert "age" in listing.disqualify_reason.lower()
+
+    def test_exactly_2_years_passes(self):
+        listing = _make_listing(business_age_months=24)
+        qualify_listing(listing)
+        assert listing.qualified
+
+    def test_old_business_passes(self):
+        listing = _make_listing(business_age_months=60)
+        qualify_listing(listing)
+        assert listing.qualified
+
+    def test_unknown_age_passes(self):
+        """Age of 0 (unknown) should pass — don't penalize missing data."""
+        listing = _make_listing(business_age_months=0)
+        qualify_listing(listing)
+        assert listing.qualified
+
+
+class TestNicheFilter:
+    def test_excluded_industry_fails(self):
+        listing = _make_listing(niche="gambling")
+        qualify_listing(listing)
+        assert not listing.qualified
+        assert "industry" in listing.disqualify_reason.lower()
+
+    def test_crypto_fails(self):
+        listing = _make_listing(niche="cryptocurrency trading")
+        qualify_listing(listing)
+        assert not listing.qualified
+
+    def test_cannabis_fails(self):
+        listing = _make_listing(niche="cbd products")
+        qualify_listing(listing)
+        assert not listing.qualified
+
+    def test_normal_niche_passes(self):
+        listing = _make_listing(niche="home and garden")
+        qualify_listing(listing)
+        assert listing.qualified
+
+    def test_unknown_niche_passes(self):
+        listing = _make_listing(niche="")
+        qualify_listing(listing)
+        assert listing.qualified
+
+
+class TestLocationFilter:
+    def test_us_location_passes(self):
+        listing = _make_listing(seller_location="United States")
+        qualify_listing(listing)
+        assert listing.qualified
+
+    def test_usa_passes(self):
+        listing = _make_listing(seller_location="USA")
+        qualify_listing(listing)
+        assert listing.qualified
+
+    def test_us_state_passes(self):
+        listing = _make_listing(seller_location="California, US")
+        qualify_listing(listing)
+        assert listing.qualified
+
+    def test_non_us_fails(self):
+        listing = _make_listing(seller_location="Australia")
+        qualify_listing(listing)
+        assert not listing.qualified
+        assert "location" in listing.disqualify_reason.lower()
+
+    def test_uk_fails(self):
+        listing = _make_listing(seller_location="United Kingdom")
+        qualify_listing(listing)
+        assert not listing.qualified
+
+    def test_unknown_location_passes(self):
+        """Empty location should pass — don't block unknowns."""
+        listing = _make_listing(seller_location="")
+        qualify_listing(listing)
+        assert listing.qualified
+
+
+# ── Full Qualification ─────────────────────────────────────────────────
+
+
+class TestFullQualification:
+    def test_ideal_listing_qualifies(self):
         listing = _make_listing()
-        score_listing(listing)
-        assert listing.total_score > 0
-
-    def test_owner_over_40_hrs_with_team_not_disqualified(self):
-        """Owner works 45 hrs but HAS a team — should NOT be disqualified."""
-        listing = _make_listing(owner_hours_per_week=45, has_team=True)
-        score_listing(listing)
-        assert listing.total_score > 0
-
-
-# ── Financial Health (30 pts) ───────────────────────────────────────────
-
-
-class TestFinancialScoring:
-    def test_low_profit_multiple_max_points(self):
-        # 2.5x multiple -> 15 pts for multiple
-        listing = _make_listing(asking_price=240_000, annual_net_profit=96_000)
-        score_listing(listing)
-        assert listing.score_breakdown["financial"] >= 15
-
-    def test_high_profit_multiple_zero_multiple_pts(self):
-        # 4.17x multiple -> 0 pts for multiple, still gets margin + trend pts
-        listing = _make_listing(asking_price=400_000, annual_net_profit=96_000)
-        score_listing(listing)
-        # Should still have margin (32% -> 8pts) and trend (15% -> 7pts) = 15
-        assert listing.score_breakdown["financial"] == 15
-
-    def test_midrange_multiple(self):
-        # 3.25x = midpoint between 2.5x and 4x -> ~7-8 pts for multiple
-        listing = _make_listing(asking_price=312_000, annual_net_profit=96_000)
-        score_listing(listing)
-        assert listing.score_breakdown["financial"] > 10
-
-    def test_high_margin_gets_8_points(self):
-        # 32% margin -> 8pts
-        listing = _make_listing(monthly_revenue=25_000, monthly_net_profit=8_000)
-        assert listing.net_margin_pct == 32.0
-
-    def test_low_margin_gets_zero(self):
-        # 8% margin -> 0pts
-        listing = _make_listing(monthly_revenue=25_000, monthly_net_profit=2_000)
-        score_listing(listing)
-        # margin alone is 0, but multiple and trend still contribute
-        assert listing.score_breakdown["financial"] >= 0
-
-    def test_growing_revenue_gets_7_points(self):
-        listing = _make_listing(revenue_trend_yoy=0.20)
-        score_listing(listing)
-        assert listing.score_breakdown["financial"] > 0
-
-    def test_flat_revenue_gets_midpoint(self):
-        # 0% growth -> ~3.5pts = rounds to 4
-        listing = _make_listing(
-            revenue_trend_yoy=0.0,
-            asking_price=240_000,  # 2.5x -> 15pts
-            monthly_revenue=25_000,
-            monthly_net_profit=8_000,  # 32% -> 8pts
-        )
-        score_listing(listing)
-        # financial = 15 (multiple) + 8 (margin) + 4 (flat trend) = 27
-        assert listing.score_breakdown["financial"] == 27
-
-    def test_unknown_trend_gets_neutral_score(self):
-        """Unknown revenue trend (None) should get neutral 4 pts."""
-        listing = _make_listing(
-            revenue_trend_yoy=None,
-            asking_price=240_000,
-            monthly_revenue=25_000,
-            monthly_net_profit=8_000,
-        )
-        score_listing(listing)
-        # financial = 15 (multiple) + 8 (margin) + 4 (neutral trend) = 27
-        assert listing.score_breakdown["financial"] == 27
-
-
-# ── Traffic & Customer Acquisition (25 pts) ─────────────────────────────
-
-
-class TestTrafficScoring:
-    def test_diversified_traffic_max_points(self):
-        listing = _make_listing(
-            traffic_sources={"organic": 30, "paid": 25, "social": 25, "direct": 20},
-            organic_traffic_pct=45,
-            email_list_size=15_000,
-            email_open_rate=25,
-        )
-        score_listing(listing)
-        assert listing.score_breakdown["traffic"] == 25
-
-    def test_single_channel_low_points(self):
-        listing = _make_listing(
-            traffic_sources={"paid": 75},
-            organic_traffic_pct=5,
-            email_list_size=0,
-            email_open_rate=0,
-        )
-        score_listing(listing)
-        assert listing.score_breakdown["traffic"] < 10
-
-    def test_email_list_zero_gets_zero_email_pts(self):
-        """No email list → 0 email points regardless of open rate."""
-        listing = _make_listing(email_list_size=0, email_open_rate=30)
-        score_listing(listing)
-        no_list = listing.score_breakdown["traffic"]
-
-        listing2 = _make_listing(email_list_size=15_000, email_open_rate=25)
-        score_listing(listing2)
-        with_list = listing2.score_breakdown["traffic"]
-        assert with_list > no_list
-
-    def test_low_open_rate_gets_zero_email_pts(self):
-        """Open rate < 15% → 0 email points even with large list."""
-        listing = _make_listing(email_list_size=20_000, email_open_rate=12)
-        score_listing(listing)
-        no_engage = listing.score_breakdown["traffic"]
-
-        listing2 = _make_listing(email_list_size=20_000, email_open_rate=25)
-        score_listing(listing2)
-        good_engage = listing2.score_breakdown["traffic"]
-        assert good_engage > no_engage
-
-    def test_unknown_traffic_gets_neutral_score(self):
-        """Empty traffic data should get neutral scores, not 0."""
-        listing = _make_api_only_listing()
-        score_listing(listing)
-        # Should get: 5 (unknown diversification) + 4 (unknown organic) + 3 (unknown email) = 12
-        assert listing.score_breakdown["traffic"] == 12
-
-
-# ── Operational Simplicity (20 pts) ─────────────────────────────────────
-
-
-class TestOperationsScoring:
-    def test_ideal_operations(self):
-        listing = _make_listing(
-            owner_hours_per_week=5,
-            fulfillment_type="3pl",
-            has_documented_sops=True,
-            has_team=True,
-        )
-        score_listing(listing)
-        assert listing.score_breakdown["operations"] == 20
-
-    def test_high_owner_involvement(self):
-        listing = _make_listing(
-            owner_hours_per_week=35,
-            fulfillment_type="owner_packed",
-            has_documented_sops=False,
-            has_team=False,
-        )
-        score_listing(listing)
-        assert listing.score_breakdown["operations"] < 5
-
-    def test_fba_fulfillment_gets_4_pts(self):
-        """Amazon FBA → 4 points (yellow flag)."""
-        listing = _make_listing(fulfillment_type="fba")
-        score_listing(listing)
-        # FBA gives 4pts instead of 6pts for 3PL — total should be 18
-        assert listing.score_breakdown["operations"] == 18
-
-    def test_amazon_fba_alias(self):
-        listing = _make_listing(fulfillment_type="amazon_fba")
-        score_listing(listing)
-        assert listing.score_breakdown["operations"] == 18
-
-    def test_hybrid_fulfillment(self):
-        listing = _make_listing(fulfillment_type="hybrid")
-        score_listing(listing)
-        # hybrid = 3pts + 8 hours + 6 SOPs/team = 17
-        assert listing.score_breakdown["operations"] == 17
-
-    def test_unknown_operations_gets_neutral_score(self):
-        """All unknown operational data should get neutral scores."""
-        listing = _make_api_only_listing()
-        score_listing(listing)
-        # 4 (unknown hours) + 3 (unknown fulfillment) + 2 (unknown team, all unknown) = 9
-        assert listing.score_breakdown["operations"] == 9
-
-
-# ── AI Optimization Upside (15 pts) ─────────────────────────────────────
-
-
-class TestAIUpsideScoring:
-    def test_high_ai_upside(self):
-        listing = _make_listing(
-            support_tickets_per_month=300,
-            email_sophistication="basic",
-            sku_count=50,
-        )
-        score_listing(listing)
-        assert listing.score_breakdown["ai_upside"] == 15
-
-    def test_low_ai_upside(self):
-        listing = _make_listing(
-            support_tickets_per_month=10,
-            email_sophistication="advanced",
-            sku_count=3,
-        )
-        score_listing(listing)
-        # 1 (tickets < 50) + 1 (advanced) + 0 (< 10 SKUs) = 2
-        assert listing.score_breakdown["ai_upside"] == 2
-
-    def test_support_tiers(self):
-        """Test the 3-tier support ticket scoring."""
-        # > 200 = 5pts
-        l1 = _make_listing(support_tickets_per_month=250)
-        score_listing(l1)
-        s1 = l1.score_breakdown["ai_upside"]
-
-        # 50-200 = 3pts
-        l2 = _make_listing(support_tickets_per_month=100)
-        score_listing(l2)
-        s2 = l2.score_breakdown["ai_upside"]
-
-        # < 50 = 1pt
-        l3 = _make_listing(support_tickets_per_month=30)
-        score_listing(l3)
-        s3 = l3.score_breakdown["ai_upside"]
-
-        assert s1 > s2 > s3
-
-    def test_sku_tiers(self):
-        """Test the 4-tier SKU scoring."""
-        # 10-100 = 5pts
-        l1 = _make_listing(sku_count=50)
-        score_listing(l1)
-
-        # 100-500 = 3pts
-        l2 = _make_listing(sku_count=200)
-        score_listing(l2)
-
-        # > 500 = 1pt
-        l3 = _make_listing(sku_count=800)
-        score_listing(l3)
-
-        # < 10 = 0pts
-        l4 = _make_listing(sku_count=5)
-        score_listing(l4)
-
-        assert l1.score_breakdown["ai_upside"] > l2.score_breakdown["ai_upside"]
-        assert l2.score_breakdown["ai_upside"] > l3.score_breakdown["ai_upside"]
-        assert l3.score_breakdown["ai_upside"] > l4.score_breakdown["ai_upside"]
-
-    def test_zero_tickets_gets_moderate_score(self):
-        """0 tickets (unknown) should get moderate score, not 0."""
-        listing = _make_listing(support_tickets_per_month=0)
-        score_listing(listing)
-        # 3 (unknown tickets) + 5 (basic email) + 5 (50 SKUs) = 13
-        assert listing.score_breakdown["ai_upside"] == 13
-
-    def test_unknown_ai_upside_gets_neutral_score(self):
-        """All unknown AI upside data should get neutral scores."""
-        listing = _make_api_only_listing()
-        score_listing(listing)
-        # 3 (unknown tickets) + 5 (empty = basic email) + 3 (unknown SKUs) = 11
-        assert listing.score_breakdown["ai_upside"] == 11
-
-
-# ── Strategic Fit (10 pts) ──────────────────────────────────────────────
-
-
-class TestStrategicFitScoring:
-    def test_perfect_strategic_fit(self):
-        listing = _make_listing(
-            niche="home and garden",
-            platform="shopify",
-            repeat_customer_rate=30,
-        )
-        score_listing(listing)
-        assert listing.score_breakdown["strategic"] == 10
-
-    def test_no_strategic_fit(self):
-        listing = _make_listing(
-            niche="crypto trading tools",
-            platform="custom",
-            repeat_customer_rate=0,
-        )
-        score_listing(listing)
-        assert listing.score_breakdown["strategic"] == 0
-
-    def test_yellow_niche_gets_2_pts(self):
-        """Beauty/food/consumer niches → 2pts."""
-        listing = _make_listing(niche="beauty products")
-        score_listing(listing)
-        # 2 (yellow niche) + 3 (shopify) + 3 (repeat > 20%) = 8
-        assert listing.score_breakdown["strategic"] == 8
-
-    def test_red_niche_gets_0_pts(self):
-        """Fashion/supplements/electronics → 0pts for niche."""
-        listing = _make_listing(niche="fashion apparel")
-        score_listing(listing)
-        # 0 (red niche) + 3 (shopify) + 3 (repeat > 20%) = 6
-        assert listing.score_breakdown["strategic"] == 6
-
-    def test_woocommerce_gets_1_pt(self):
-        """WooCommerce platform → 1pt."""
-        listing = _make_listing(platform="woocommerce")
-        score_listing(listing)
-        # 4 (home niche) + 1 (woo) + 3 (repeat > 20%) = 8
-        assert listing.score_breakdown["strategic"] == 8
-
-    def test_custom_platform_gets_0_pts(self):
-        """Custom/Magento/BigCommerce → 0pts."""
-        listing = _make_listing(platform="magento")
-        score_listing(listing)
-        # 4 (home niche) + 0 (magento) + 3 (repeat > 20%) = 7
-        assert listing.score_breakdown["strategic"] == 7
-
-    def test_repeat_customer_midrange(self):
-        """10-20% repeat → 2pts (rounded from 1.5)."""
-        listing = _make_listing(repeat_customer_rate=15)
-        score_listing(listing)
-        # 4 (home) + 3 (shopify) + 2 (10-20% repeat) = 9
-        assert listing.score_breakdown["strategic"] == 9
-
-    def test_repeat_customer_below_10_gets_0(self):
-        """< 10% repeat → 0pts."""
-        listing = _make_listing(repeat_customer_rate=5)
-        score_listing(listing)
-        # 4 (home) + 3 (shopify) + 0 = 7
-        assert listing.score_breakdown["strategic"] == 7
-
-    def test_unknown_niche_gets_1_pt_if_known(self):
-        """Known niche not in any list gets 1pt."""
-        listing = _make_listing(niche="automotive accessories")
-        score_listing(listing)
-        # 1 (unlisted niche) + 3 (shopify) + 3 (repeat > 20%) = 7
-        assert listing.score_breakdown["strategic"] == 7
-
-
-# ── Full Scoring ────────────────────────────────────────────────────────
-
-
-class TestFullScoring:
-    def test_ideal_listing_scores_high(self):
-        listing = _make_listing()
-        score_listing(listing)
-        assert listing.total_score >= 70
-        assert listing.total_score <= 100
-
-    def test_score_is_sum_of_breakdown(self):
-        listing = _make_listing()
-        score_listing(listing)
-        assert listing.total_score == sum(listing.score_breakdown.values())
+        qualify_listing(listing)
+        assert listing.qualified
+        assert listing.disqualify_reason == ""
+
+    def test_minimal_listing_qualifies(self):
+        listing = _make_minimal_listing()
+        qualify_listing(listing)
+        assert listing.qualified
 
     def test_sheet_row_output(self):
         listing = _make_listing()
-        score_listing(listing)
+        qualify_listing(listing)
         row = listing.to_sheet_row()
-        assert len(row) == 19
+        assert len(row) == 18
         assert row[0] == listing.url
         assert row[1] == "flippa"
+        assert row[2] == "Test Store"
 
-    def test_score_classification_strong_buy(self):
-        """Ideal listing with all green flags should be 80+."""
+    def test_listing_with_description(self):
         listing = _make_listing(
-            asking_price=240_000,  # 2.5x multiple
-            annual_net_profit=96_000,
-            monthly_revenue=25_000,
-            monthly_net_profit=8_000,  # 32% margin
-            revenue_trend_yoy=0.15,
-            traffic_sources={"organic": 30, "paid": 25, "social": 25, "direct": 20},
-            organic_traffic_pct=45,
-            email_list_size=15_000,
-            email_open_rate=25,
-            owner_hours_per_week=5,
-            fulfillment_type="3pl",
-            has_documented_sops=True,
-            has_team=True,
-            support_tickets_per_month=300,
-            email_sophistication="basic",
-            sku_count=50,
-            niche="home and garden",
-            platform="shopify",
-            repeat_customer_rate=30,
+            listing_title="Premium Home & Garden Store",
+            description="Established Shopify store selling premium home decor products...",
         )
-        score_listing(listing)
-        assert listing.total_score >= 80
+        qualify_listing(listing)
+        assert listing.qualified
+        assert listing.listing_title == "Premium Home & Garden Store"
+        assert listing.description.startswith("Established")
 
-    def test_api_only_listing_scores_reasonable(self):
-        """Listing with only API data should score 40-60 range (not 10)."""
-        listing = _make_api_only_listing()
-        score_listing(listing)
-        # Should get decent scores from financials + neutral scores elsewhere
-        assert listing.total_score >= 35, (
-            "API-only listings should score reasonably, got %d: %s"
-            % (listing.total_score, listing.score_breakdown)
-        )
-        assert listing.total_score <= 70  # shouldn't be too high either
+    def test_empire_flippers_source(self):
+        listing = _make_listing(source="empire_flippers")
+        qualify_listing(listing)
+        assert listing.qualified
+        assert listing.source == "empire_flippers"
 
 
 # ── Flippa Utility Tests ───────────────────────────────────────────────

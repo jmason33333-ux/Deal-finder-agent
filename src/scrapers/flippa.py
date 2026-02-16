@@ -6,7 +6,7 @@ Falls back to HTML scraping if the API is unavailable or rate-limited.
 
 Filter strategy (based on API diagnostics in scripts/diagnose_api.py):
   API-side:  property_type=ecommerce_store, status=open, price $50k-$500k
-  Client:    profit >= $5k/mo, age >= 2 years, industry not excluded
+  Client:    profit >= $5k/mo, age >= 2 years, industry not excluded, US location
   Note:      sort param is ignored by the API; we fetch 20 pages to compensate
 """
 
@@ -19,7 +19,7 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 from typing import Optional
 
-from src.config import FLIPPA_API_KEY, FILTERS, EXCLUDED_INDUSTRIES
+from src.config import FLIPPA_API_KEY, FILTERS, EXCLUDED_INDUSTRIES, ALLOWED_LOCATIONS
 from src.models import Listing
 from src.logger import get_logger
 
@@ -66,8 +66,7 @@ class FlippaClient:
     def _fetch_via_api(self, max_pages: int) -> list[Listing]:
         """Fetch listings from the Flippa search API with broad query."""
         all_listings: list[Listing] = []
-        skipped = {"price": 0, "profit": 0, "age": 0, "industry": 0, "parse": 0}
-        # Track notable skips for diagnostics
+        skipped = {"price": 0, "profit": 0, "age": 0, "industry": 0, "location": 0, "parse": 0}
         notable_skips: list[str] = []
 
         for page in range(1, max_pages + 1):
@@ -77,7 +76,6 @@ class FlippaClient:
             if data is None:
                 break
 
-            # Log response structure on first page
             if page == 1:
                 meta = data.get("meta", {})
                 total = meta.get("total_results", "?")
@@ -94,11 +92,9 @@ class FlippaClient:
                     skipped["parse"] += 1
                     continue
 
-                # Client-side funnel
                 reason = self._filter_listing(listing)
                 if reason:
                     skipped[reason] += 1
-                    # Log notable skips — listings with revenue but filtered out
                     if reason == "profit" and listing.monthly_revenue >= 10_000:
                         notable_skips.append(
                             "  SKIP[profit] rev={:,.0f}/mo profit={:,.0f}/mo price={:,.0f} — {}".format(
@@ -110,20 +106,18 @@ class FlippaClient:
 
                 all_listings.append(listing)
 
-            # Check if there are more pages
             total_results = data.get("meta", {}).get("total_results", 0)
             fetched_so_far = page * 50
             if fetched_so_far >= total_results:
                 break
-            time.sleep(1)  # respect rate limits
+            time.sleep(1)
 
         log.info(
-            "Funnel: %d passed | skipped — price:%d profit:%d age:%d industry:%d parse:%d",
+            "Funnel: %d passed | skipped — price:%d profit:%d age:%d industry:%d location:%d parse:%d",
             len(all_listings), skipped["price"], skipped["profit"],
-            skipped["age"], skipped["industry"], skipped["parse"],
+            skipped["age"], skipped["industry"], skipped["location"], skipped["parse"],
         )
 
-        # Show notable skips so user can see what's being missed
         if notable_skips:
             log.info("Notable skips (had revenue >= $10k/mo but failed profit filter):")
             for skip in notable_skips[:15]:
@@ -132,23 +126,13 @@ class FlippaClient:
         return all_listings
 
     def _build_api_params(self, page: int) -> dict:
-        """Build query parameters for Flippa API.
-
-        Based on diagnostic testing (scripts/diagnose_api.py):
-        - sort param is IGNORED by the API (all sort values return same order)
-        - filter[property_type]=ecommerce_store works and narrows to ecom only
-        - filter[status]=open works to get only active listings
-        - filter[price][min/max] works to narrow price range
-        """
+        """Build query parameters for Flippa API."""
         params = {
             "page[number]": page,
             "page[size]": 50,
-            # Only ecommerce stores (confirmed working value from API diagnostics)
             "filter[property_type]": "ecommerce_store",
-            # Only active listings
             "filter[status]": "open",
         }
-        # Price filter
         max_price = FILTERS.get("max_price")
         if max_price:
             params["filter[price][max]"] = max_price
@@ -177,25 +161,14 @@ class FlippaClient:
         return None
 
     def _parse_api_listing(self, item: dict) -> Optional[Listing]:
-        """Parse a single listing from the Flippa API response.
-
-        Actual API fields (from live response):
-            id, title, summary, html_url, display_price, current_price,
-            profit_per_month, revenue_per_month, average_profit, average_revenue,
-            industry, property_type, business_model, seller_location,
-            established_at, has_verified_revenue, has_verified_traffic,
-            page_views_per_month, uniques_per_month, revenue_sources
-        """
+        """Parse a single listing from the Flippa API response."""
         try:
-            # The API returns flat objects (no "attributes" wrapper)
             attrs = item.get("attributes", item)
 
-            # Financial data — use monthly fields, fall back to averages
             asking_price = _to_float(attrs.get("display_price") or attrs.get("current_price", 0))
             monthly_revenue = _to_float(attrs.get("revenue_per_month") or attrs.get("average_revenue", 0))
             monthly_profit = _to_float(attrs.get("profit_per_month") or attrs.get("average_profit", 0))
 
-            # URL — use html_url directly (constructing our own gives 404s)
             url = attrs.get("html_url", "")
             if not url and item.get("id"):
                 url = "https://flippa.com/{}".format(item["id"])
@@ -205,7 +178,6 @@ class FlippaClient:
             established_at = attrs.get("established_at")
             if established_at:
                 try:
-                    # Handle ISO format: "2026-01-01T11:00:00+11:00"
                     est_str = established_at.split("T")[0]
                     est_date = datetime.strptime(est_str, "%Y-%m-%d")
                     now = datetime.now()
@@ -213,27 +185,26 @@ class FlippaClient:
                 except (ValueError, IndexError):
                     pass
 
-            # Seller location
             seller_location = attrs.get("seller_location", "") or ""
-
-            # Industry / niche
             industry = attrs.get("industry", "") or ""
+            title = attrs.get("title", "Unknown") or "Unknown"
 
-            # Property type / business model
-            property_type = attrs.get("property_type", "") or ""
-            business_model = attrs.get("business_model", "") or ""
+            # Capture listing summary/description from API
+            summary = attrs.get("summary", "") or ""
 
             listing = Listing(
                 url=url,
                 source="flippa",
-                business_name=attrs.get("title", "Unknown") or "Unknown",
+                business_name=title,
+                listing_title=title,
+                description=summary,
                 niche=industry,
                 asking_price=asking_price,
                 monthly_revenue=monthly_revenue,
                 monthly_net_profit=monthly_profit,
                 annual_revenue=monthly_revenue * 12,
                 annual_net_profit=monthly_profit * 12,
-                platform=property_type,
+                platform=attrs.get("property_type", "") or "",
                 business_age_months=age_months,
                 seller_location=seller_location,
             )
@@ -245,13 +216,7 @@ class FlippaClient:
     # ── Client-side filtering funnel ────────────────────────────────────
 
     def _filter_listing(self, listing: Listing) -> str:
-        """Apply client-side filters. Returns skip reason or '' if it passes.
-
-        Profit filter strategy: Many Flippa API listings report profit_per_month=0
-        even for profitable businesses (the real data is on the detail page).
-        So we use a fallback: if profit is 0 but monthly revenue is high enough
-        that a 20% margin would clear our threshold, let it through for enrichment.
-        """
+        """Apply client-side filters. Returns skip reason or '' if it passes."""
         # Price cap
         if listing.asking_price > FILTERS.get("max_price", 500_000):
             return "price"
@@ -260,18 +225,14 @@ class FlippaClient:
         min_profit = FILTERS.get("min_monthly_profit", 5_000)
         has_profit_data = listing.monthly_net_profit > 0
         if has_profit_data:
-            # Profit data exists — use it directly
             if listing.monthly_net_profit < min_profit:
                 return "profit"
         else:
-            # No profit data — use revenue as proxy (assume ~20% margin is possible)
-            # Revenue of $25k/mo * 20% = $5k/mo profit potential
-            min_revenue_proxy = min_profit / 0.20  # $25k for $5k profit target
+            min_revenue_proxy = min_profit / 0.20
             if listing.monthly_revenue < min_revenue_proxy:
                 return "profit"
 
-        # Minimum business age — must be established > 2 years (24 months)
-        # age_months == 0 means unknown (no established_at in API) — let through
+        # Minimum business age
         min_age = FILTERS.get("min_business_age_months", 24)
         if 0 < listing.business_age_months < min_age:
             return "age"
@@ -282,7 +243,38 @@ class FlippaClient:
             if any(excl in niche_lower for excl in EXCLUDED_INDUSTRIES):
                 return "industry"
 
+        # Location — must be in the US
+        if listing.seller_location:
+            location_lower = listing.seller_location.lower()
+            if not any(re.search(r'\b' + re.escape(loc) + r'\b', location_lower) for loc in ALLOWED_LOCATIONS):
+                return "location"
+
         return ""
+
+    # ── Detail page enrichment ─────────────────────────────────────────
+
+    def fetch_listing_details(self, listing: Listing) -> Listing:
+        """Enrich a listing with description text from its detail page."""
+        if not listing.url:
+            return listing
+
+        html = self._scrape_request(listing.url, {})
+        if html is None:
+            return listing
+
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Grab the full description text if we don't have it from the API
+        if not listing.description:
+            desc = _extract_description(soup)
+            if desc:
+                listing.description = desc
+
+        # Also grab platform if available
+        listing.platform = _extract_text_by_label(soup, "platform") or listing.platform
+
+        log.info("Enriched listing: %s", listing.business_name[:60])
+        return listing
 
     # ── Web scraping fallback ───────────────────────────────────────────
 
@@ -308,7 +300,7 @@ class FlippaClient:
                 if not reason:
                     all_listings.append(listing)
 
-            time.sleep(2)  # be polite
+            time.sleep(2)
 
         return all_listings
 
@@ -335,7 +327,6 @@ class FlippaClient:
         soup = BeautifulSoup(html, "html.parser")
         listings = []
 
-        # Flippa uses listing cards with data attributes
         cards = soup.select("[data-listing-id], .ListingCard, .Listing__card")
         for card in cards:
             listing = self._parse_html_card(card)
@@ -348,20 +339,17 @@ class FlippaClient:
     def _parse_html_card(self, card) -> Optional[Listing]:
         """Parse a single listing card from HTML."""
         try:
-            # Extract listing URL
             link = card.select_one("a[href*='/listing/'], a[href*='flippa.com']")
             url = ""
             if link:
                 href = link.get("href", "")
                 url = href if href.startswith("http") else "https://flippa.com{}".format(href)
 
-            # Extract title
             title_el = card.select_one(
                 ".ListingCard__title, .Listing__title, h3, h2, [class*='title']"
             )
             title = title_el.get_text(strip=True) if title_el else "Unknown"
 
-            # Extract price
             price_el = card.select_one(
                 "[class*='price'], [data-price], .ListingCard__price"
             )
@@ -369,13 +357,11 @@ class FlippaClient:
                 price_el.get_text(strip=True) if price_el else "0"
             )
 
-            # Extract revenue
             revenue_el = card.select_one("[class*='revenue'], [data-revenue]")
             monthly_revenue = _extract_dollar_amount(
                 revenue_el.get_text(strip=True) if revenue_el else "0"
             )
 
-            # Extract profit
             profit_el = card.select_one("[class*='profit'], [data-profit]")
             monthly_profit = _extract_dollar_amount(
                 profit_el.get_text(strip=True) if profit_el else "0"
@@ -385,6 +371,7 @@ class FlippaClient:
                 url=url,
                 source="flippa",
                 business_name=title,
+                listing_title=title,
                 asking_price=asking_price,
                 monthly_revenue=monthly_revenue,
                 monthly_net_profit=monthly_profit,
@@ -395,36 +382,6 @@ class FlippaClient:
         except Exception as e:
             log.warning("Failed to parse HTML card: %s", e)
             return None
-
-    def fetch_listing_details(self, listing: Listing) -> Listing:
-        """Enrich a listing with detailed data from its individual page."""
-        if not listing.url:
-            return listing
-
-        html = self._scrape_request(listing.url, {})
-        if html is None:
-            return listing
-
-        soup = BeautifulSoup(html, "html.parser")
-
-        # Try to extract additional detail fields
-        listing.platform = _extract_text_by_label(soup, "platform") or listing.platform
-        listing.niche = _extract_text_by_label(soup, "category", "industry", "niche") or listing.niche
-
-        age_text = _extract_text_by_label(soup, "age", "established")
-        if age_text:
-            listing.business_age_months = _parse_age_to_months(age_text)
-
-        hours_text = _extract_text_by_label(soup, "hours", "owner time")
-        if hours_text:
-            listing.owner_hours_per_week = _to_float(re.sub(r"[^\d.]", "", hours_text))
-
-        fulfillment_text = _extract_text_by_label(soup, "fulfillment", "shipping")
-        if fulfillment_text:
-            listing.fulfillment_type = _normalize_fulfillment(fulfillment_text)
-
-        log.info("Enriched listing: %s", listing.business_name[:60])
-        return listing
 
 
 # ── Utility functions ───────────────────────────────────────────────────
@@ -450,7 +407,6 @@ def _extract_dollar_amount(text: str) -> float:
     if not text:
         return 0.0
     text = text.replace(",", "").replace("$", "").strip()
-    # Handle K/M suffixes
     match = re.search(r"([\d.]+)\s*([KkMm])?", text)
     if match:
         num = float(match.group(1))
@@ -484,18 +440,40 @@ def _normalize_fulfillment(text: str) -> str:
 def _extract_text_by_label(soup: BeautifulSoup, *labels: str) -> str:
     """Find a value on a detail page by looking for label text."""
     for label in labels:
-        # Look for dt/dd pairs, label/value pairs, table rows
         for el in soup.find_all(string=re.compile(label, re.IGNORECASE)):
             parent = el.parent
             if parent:
-                # Try next sibling
                 sibling = parent.find_next_sibling()
                 if sibling:
                     return sibling.get_text(strip=True)
-                # Try parent's next element
                 next_el = parent.find_next()
                 if next_el and next_el != parent:
                     return next_el.get_text(strip=True)
+    return ""
+
+
+def _extract_description(soup: BeautifulSoup) -> str:
+    """Extract the main listing description text from a Flippa detail page."""
+    # Try common description containers
+    for selector in [
+        ".listing-description", ".Listing__description",
+        "[class*='description']", ".listing-content",
+        "article", ".main-content",
+    ]:
+        el = soup.select_one(selector)
+        if el:
+            text = el.get_text(separator="\n", strip=True)
+            if len(text) > 50:
+                return text[:5000]  # cap at 5k chars for AI prompt
+
+    # Fallback: look for the largest text block in the page
+    paragraphs = soup.find_all("p")
+    if paragraphs:
+        longest = max(paragraphs, key=lambda p: len(p.get_text(strip=True)))
+        text = longest.get_text(strip=True)
+        if len(text) > 50:
+            return text[:5000]
+
     return ""
 
 
@@ -509,7 +487,6 @@ def _parse_age_to_months(text: str) -> int:
     if month_match:
         months += int(month_match.group(1))
     if not year_match and not month_match:
-        # Try bare number
         num_match = re.search(r"(\d+)", text)
         if num_match:
             months = int(num_match.group(1))
