@@ -1,14 +1,13 @@
 """
-Qualification engine for e-commerce business listings.
+Qualification + deal scoring for e-commerce business listings.
 
-Simple pass/fail filters on data we can actually verify from the API:
-  - Financials: profit >= $5k/mo, margin >= 10%, multiple <= 4x
-  - Age: established > 2 years
-  - Niche: not in excluded industries
-  - Location: seller is in the US
+Two stages:
+  1. Qualify: hard pass/fail filters (financials, age, niche, location)
+  2. Score:   0-100 deal score ranking qualified listings by attractiveness
 
-No points, no neutral scores, no guessing. If a listing passes all
-gates it's qualified for AI summarization.
+The deal score uses only data we already have from the API — no extra
+calls needed. It ranks listings so the pipeline can cap how many get
+sent to Gemini for AI analysis (e.g. top 25 per run).
 """
 
 from __future__ import annotations
@@ -119,3 +118,66 @@ def _check_filters(listing: Listing) -> str:
     # Empty location = unknown — let through, can be checked manually
 
     return ""
+
+
+# ── Deal Score (0-100) ───────────────────────────────────────────────
+
+
+def score_listing(listing: Listing) -> int:
+    """Compute a 0-100 deal score for a qualified listing.
+
+    Used to rank-and-cap which listings get sent to Gemini.
+    Only call this on listings that already passed qualify_listing().
+
+    Components (total = 100):
+      - Profit multiple:  0-30 pts  (lower multiple = better value)
+      - Net margin:       0-25 pts  (higher margin = more efficient)
+      - Monthly profit:   0-25 pts  (closer to $10K/mo target = better)
+      - Business age:     0-20 pts  (older = more proven)
+    """
+    score = 0
+
+    # ── Profit multiple (30 pts) — lower is better ───────────────────
+    # 1.5x or less = 30, 4x = 0, linear between
+    if listing.profit_multiple != float("inf") and listing.profit_multiple > 0:
+        multiple = listing.profit_multiple
+        if multiple <= 1.5:
+            score += 30
+        elif multiple >= 4.0:
+            score += 0
+        else:
+            # Linear: 30 at 1.5x, 0 at 4.0x
+            score += int(30 * (4.0 - multiple) / 2.5)
+
+    # ── Net margin (25 pts) — higher is better ───────────────────────
+    # 40%+ = 25, 10% = 0, linear between
+    margin = listing.net_margin_pct
+    if margin >= 40:
+        score += 25
+    elif margin >= 10:
+        score += int(25 * (margin - 10) / 30)
+
+    # ── Monthly profit (25 pts) — closer to target = better ─────────
+    # $10K+/mo = 25, $5K = 5, linear between
+    profit = listing.monthly_net_profit
+    if profit <= 0 and listing.monthly_revenue > 0:
+        # Estimate from revenue at assumed 20% margin
+        profit = listing.monthly_revenue * 0.20
+    if profit >= 10_000:
+        score += 25
+    elif profit >= 5_000:
+        score += 5 + int(20 * (profit - 5_000) / 5_000)
+
+    # ── Business age (20 pts) — older is more proven ─────────────────
+    # 5+ years = 20, 2 years = 5, linear between
+    age = listing.business_age_months
+    if age == 0:
+        # Unknown age — give a neutral middle score
+        score += 10
+    elif age >= 60:
+        score += 20
+    elif age >= 24:
+        score += 5 + int(15 * (age - 24) / 36)
+
+    listing.deal_score = score
+    return score

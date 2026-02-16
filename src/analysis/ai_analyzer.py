@@ -97,14 +97,13 @@ def analyze_listing(listing: Listing) -> Listing:
 
 
 def analyze_batch(listings: list[Listing]) -> list[Listing]:
-    """Run AI analysis on all qualified listings."""
-    qualified = [l for l in listings if l.qualified]
-    log.info(
-        "%d of %d listings qualified for AI analysis",
-        len(qualified),
-        len(listings),
-    )
-    for listing in qualified:
+    """Run AI analysis on the provided listings.
+
+    The caller is responsible for pre-filtering (e.g. top N by deal score).
+    This function processes every listing in the input list.
+    """
+    log.info("Running AI analysis on %d listings...", len(listings))
+    for listing in listings:
         analyze_listing(listing)
     return listings
 

@@ -32,6 +32,7 @@ HEADER_ROW = [
     "Monthly Net Profit",
     "Profit Multiple",
     "Net Margin %",
+    "Deal Score",
     "Platform",
     "Business Age",
     "Seller Location",

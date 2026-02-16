@@ -1,8 +1,8 @@
-"""Tests for the qualification engine and data model."""
+"""Tests for the qualification engine, deal scoring, and data model."""
 
 import pytest
 from src.models import Listing
-from src.analysis.scoring import qualify_listing
+from src.analysis.scoring import qualify_listing, score_listing
 
 
 def _make_listing(**kwargs) -> Listing:
@@ -252,11 +252,13 @@ class TestFullQualification:
     def test_sheet_row_output(self):
         listing = _make_listing()
         qualify_listing(listing)
+        score_listing(listing)
         row = listing.to_sheet_row()
-        assert len(row) == 18
+        assert len(row) == 19
         assert row[0] == listing.url
         assert row[1] == "flippa"
         assert row[2] == "Test Store"
+        assert isinstance(row[9], int)  # deal_score column
 
     def test_listing_with_description(self):
         listing = _make_listing(
@@ -305,3 +307,91 @@ class TestFlippaUtilities:
         assert _parse_age_to_months("1 year") == 12
         assert _parse_age_to_months("6 months") == 6
         assert _parse_age_to_months("24") == 24
+
+
+# ── Deal Score Tests ───────────────────────────────────────────────────
+
+
+class TestDealScore:
+    """Test the 0-100 deal score ranking."""
+
+    def test_score_range(self):
+        listing = _make_listing()
+        s = score_listing(listing)
+        assert 0 <= s <= 100
+
+    def test_excellent_deal_scores_high(self):
+        """Low multiple, high margin, high profit, old business = high score."""
+        listing = _make_listing(
+            asking_price=150_000,
+            monthly_revenue=25_000, monthly_net_profit=10_000,
+            annual_revenue=300_000, annual_net_profit=120_000,
+            business_age_months=60,
+        )
+        s = score_listing(listing)
+        assert s >= 75
+
+    def test_borderline_deal_scores_low(self):
+        """Max multiple, min margin, min profit, min age = low score."""
+        listing = _make_listing(
+            asking_price=230_000,
+            monthly_revenue=50_000, monthly_net_profit=5_000,
+            annual_revenue=600_000, annual_net_profit=60_000,
+            business_age_months=24,
+        )
+        s = score_listing(listing)
+        assert s <= 40
+
+    def test_better_multiple_scores_higher(self):
+        """Lower profit multiple should produce a higher score."""
+        base = dict(
+            monthly_revenue=25_000, monthly_net_profit=8_000,
+            annual_revenue=300_000, annual_net_profit=96_000,
+            business_age_months=36,
+        )
+        low_multiple = _make_listing(asking_price=150_000, **base)
+        high_multiple = _make_listing(asking_price=350_000, **base)
+        assert score_listing(low_multiple) > score_listing(high_multiple)
+
+    def test_higher_profit_scores_higher(self):
+        """Higher monthly profit should produce a higher score."""
+        low_profit = _make_listing(
+            asking_price=200_000,
+            monthly_net_profit=5_000, annual_net_profit=60_000,
+            monthly_revenue=20_000,
+        )
+        high_profit = _make_listing(
+            asking_price=200_000,
+            monthly_net_profit=10_000, annual_net_profit=120_000,
+            monthly_revenue=25_000,
+        )
+        assert score_listing(high_profit) > score_listing(low_profit)
+
+    def test_older_business_scores_higher(self):
+        """Older business should score higher than younger (both qualifying)."""
+        young = _make_listing(business_age_months=24)
+        old = _make_listing(business_age_months=60)
+        assert score_listing(old) > score_listing(young)
+
+    def test_unknown_age_gets_neutral_score(self):
+        """Unknown age (0) should get a middle-ground score, not 0."""
+        listing = _make_listing(business_age_months=0)
+        s = score_listing(listing)
+        # Should get the neutral 10 pts for age
+        assert listing.deal_score > 0
+
+    def test_score_stored_on_listing(self):
+        listing = _make_listing()
+        s = score_listing(listing)
+        assert listing.deal_score == s
+
+    def test_revenue_proxy_for_missing_profit(self):
+        """Score should use revenue as profit proxy when profit is 0."""
+        listing = _make_listing(
+            asking_price=200_000,
+            monthly_net_profit=0, annual_net_profit=0,
+            monthly_revenue=40_000, annual_revenue=480_000,
+        )
+        s = score_listing(listing)
+        # Revenue proxy: 40K * 0.20 = $8K estimated profit, should get some profit points
+        assert s > 10

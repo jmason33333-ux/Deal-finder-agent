@@ -59,6 +59,9 @@ class Listing:
     qualified: bool = False
     disqualify_reason: str = ""
 
+    # Deal score (0-100) — ranks qualified listings for AI prioritization
+    deal_score: int = 0
+
     # AI analysis (filled by Gemini summarization)
     ai_summary: str = ""
     ai_verdict: str = ""  # "STRONG BUY" / "INVESTIGATE" / "PASS"
@@ -81,6 +84,7 @@ class Listing:
             f"${self.monthly_net_profit:,.0f}",
             f"{self.profit_multiple:.1f}x" if self.profit_multiple != float("inf") else "N/A",
             f"{self.net_margin_pct:.1f}%",
+            self.deal_score,
             self.platform,
             f"{self.business_age_months} mo",
             self.seller_location,

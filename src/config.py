@@ -51,5 +51,6 @@ EXCLUDED_INDUSTRIES = {
     "cryptocurrency", "crypto", "forex", "binary options",
 }
 
-# Gemini model for AI summarization
+# AI analysis settings
 GEMINI_MODEL = "gemini-2.5-flash-preview-05-20"
+MAX_AI_LISTINGS = 25  # Only send the top N scored listings to Gemini per run
